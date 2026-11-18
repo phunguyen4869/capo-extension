@@ -35,7 +35,7 @@ export const DEFAULT_OPTIONS = {
   formant: false,
   separate: false,
   /** γ: càng lớn thì lớp giọng càng chỉ lấy phần thật sự ở giữa stereo. */
-  centerWidth: 12,
+  centerWidth: 4,
   stems: { drums: stem(false), bass: stem(true), vocals: stem(true), other: stem(true) },
 };
 
@@ -64,6 +64,18 @@ export function mergeOptions(base = DEFAULT_OPTIONS, patch = {}) {
   o.centerWidth = clamp(o.centerWidth, 1, 32, DEFAULT_OPTIONS.centerWidth);
   if (!QUALITY_PRESETS[o.quality]) o.quality = DEFAULT_OPTIONS.quality;
   return o;
+}
+
+/** γ dùng khi lớp giọng không phát ra (tắt giọng kiểu karaoke): ưu tiên lấy hết giọng khỏi nhạc nền. */
+export const KARAOKE_CENTER_WIDTH = 2;
+
+/**
+ * γ thực tế đưa cho bộ tách. Khi lớp giọng không nghe được (mute, âm lượng 0, hoặc lớp khác đang solo) thì
+ * không còn lý do giữ lớp giọng "sạch": γ lớn chỉ làm giọng có vang/bè stereo sót lại trong các lớp đang phát.
+ */
+export function effectiveCenterWidth(options) {
+  const vocalsAudible = effectiveGains(options.stems).vocals > 0;
+  return vocalsAudible ? options.centerWidth : Math.min(options.centerWidth, KARAOKE_CENTER_WIDTH);
 }
 
 /** Gain thực tế của từng lớp sau khi áp mute/solo. */

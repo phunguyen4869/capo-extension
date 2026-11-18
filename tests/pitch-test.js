@@ -3,7 +3,7 @@
 
 import { createEngine } from '../audio/engine.js';
 import { createSeparatorNode } from '../audio/separator-node.js';
-import { STEM_NAMES, separatorPreset } from '../presets.js';
+import { DEFAULT_OPTIONS, KARAOKE_CENTER_WIDTH, STEM_NAMES, effectiveCenterWidth, mergeOptions, separatorPreset } from '../presets.js';
 
 const SR = 48000;
 const DRUMS = 0, BASS = 1, VOCALS = 2, OTHER = 3;
@@ -351,6 +351,35 @@ async function testStemControls() {
   record('stemControls', { test: 'solo giọng: 660 Hz giảm (dB)', value: +guitarCut.toFixed(1), pass: guitarCut > 15 });
   const halfDb = db(p(base.y, 660) / p(half.y, 660));
   record('stemControls', { test: 'nhạc cụ khác 50%: 660 Hz giảm ≈ 6 dB', value: +halfDb.toFixed(2), pass: Math.abs(halfDb - 6.02) < 1 });
+
+  // Giọng có độ rộng stereo: R nhỏ hơn L 6 dB ⇒ ψ = 0.8. Lớp giọng nhận ψ^γ, phần còn lại ở "nhạc cụ khác".
+  // Tắt giọng ⇒ engine dùng γ = min(thanh trượt, KARAOKE_CENTER_WIDTH) để giọng sót lại ít hơn;
+  // solo giọng ⇒ vẫn dùng γ của thanh trượt (lớp giọng sạch).
+  const wide = { l: vocal, r: vocal.map((v) => 0.5 * v) };
+  const wideBase = await renderEngine(wide, { options: SEP() });
+  const wideMuted = await renderEngine(wide, { options: SEP({ stems: { vocals: { mute: true } } }) });
+  const wideSolo = await renderEngine(wide, { options: SEP({ stems: { vocals: { solo: true } } }) });
+  const cutAt = (gamma) => -20 * Math.log10(1 - 0.8 ** gamma);
+  const wideCut = db(p(wideBase.y, 440) / p(wideMuted.y, 440));
+  const wantCut = cutAt(Math.min(DEFAULT_OPTIONS.centerWidth, KARAOKE_CENTER_WIDTH));
+  record('stemControls', {
+    test: `mute giọng rộng (ψ=0.8): 440 Hz giảm ≈ ${wantCut.toFixed(1)} dB (γ karaoke)`, value: +wideCut.toFixed(2),
+    pass: Math.abs(wideCut - wantCut) < 1,
+  });
+  const soloKeep = db(p(wideBase.y, 440) / p(wideSolo.y, 440));
+  const wantKeep = -20 * Math.log10(0.8 ** DEFAULT_OPTIONS.centerWidth);
+  record('stemControls', {
+    test: `solo giọng rộng (ψ=0.8): 440 Hz giảm ≈ ${wantKeep.toFixed(1)} dB (γ thanh trượt)`, value: +soloKeep.toFixed(2),
+    pass: Math.abs(soloKeep - wantKeep) < 1,
+  });
+  const cw = (patch) => effectiveCenterWidth(mergeOptions(undefined, patch));
+  record('stemControls', {
+    test: 'γ thực tế: bình thường / mute giọng / solo lớp khác / âm lượng giọng 0 / thanh trượt 1 + mute',
+    value: [cw({}), cw({ stems: { vocals: { mute: true } } }), cw({ stems: { other: { solo: true } } }), cw({ stems: { vocals: { gain: 0 } } }), cw({ centerWidth: 1, stems: { vocals: { mute: true } } })].join(' / '),
+    pass: cw({}) === DEFAULT_OPTIONS.centerWidth && cw({ stems: { vocals: { mute: true } } }) === KARAOKE_CENTER_WIDTH
+      && cw({ stems: { other: { solo: true } } }) === KARAOKE_CENTER_WIDTH && cw({ stems: { vocals: { gain: 0 } } }) === KARAOKE_CENTER_WIDTH
+      && cw({ centerWidth: 1, stems: { vocals: { mute: true } } }) === 1,
+  });
 
   // Đổi tông riêng: giọng +5, nhạc cụ khác giữ nguyên.
   const per = await renderEngine(x, { semitones: 5, options: SEP({ stems: { other: { transpose: false } } }) });

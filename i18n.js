@@ -74,7 +74,7 @@ const DICT = {
     'opt.mode.cheaper': 'Save CPU (pitch shift only)',
     'opt.formant': 'Preserve formants — vocals sound less "chipmunk"',
     'opt.center': 'Vocal focus',
-    'opt.centerHint': 'Higher: cleaner vocal stem, but some vocals may leak into other stems.',
+    'opt.centerHint': 'Higher: cleaner vocal stem, but some vocals may leak into other stems. While the vocal stem is muted, at most 2 is used so more of the voice is removed.',
     'footer.shortcuts': 'Shortcuts: Alt+Shift+↑ / ↓ / 0 · in popup: + / − / 0',
     'msg.turnedOff': 'Turned off — the tab plays its original audio.',
 
@@ -206,7 +206,7 @@ const DICT = {
     'opt.mode.cheaper': 'Tiết kiệm CPU (phần đổi tông)',
     'opt.formant': 'Giữ formant — giọng hát đỡ bị "méo"/"chipmunk"',
     'opt.center': 'Độ hẹp vùng giọng hát',
-    'opt.centerHint': 'Cao hơn: lớp giọng sạch hơn nhưng có thể sót giọng sang lớp khác.',
+    'opt.centerHint': 'Cao hơn: lớp giọng sạch hơn nhưng có thể sót giọng sang lớp khác. Khi tắt lớp giọng, mức tối đa 2 được dùng để lấy giọng ra nhiều hơn.',
     'footer.shortcuts': 'Phím tắt: Alt+Shift+↑ / ↓ / 0 · trong popup: + / − / 0',
     'msg.turnedOff': 'Đã tắt — tab phát lại âm thanh gốc.',
 

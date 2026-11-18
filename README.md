@@ -68,7 +68,7 @@ After editing code, click ↻ **Reload** on the CAPO card in `chrome://extension
 
 Add your audio device's own latency. The video is not delayed, so the sound lags the picture by that amount.
 
-**Vocal focus** (2–24, default 12): higher values make the vocal stem cleaner, at the risk of leaving some vocals in other stems.
+**Vocal focus** (2–24, default 4): higher values make the vocal stem cleaner, at the risk of leaving some vocals in other stems. While the vocal stem is not audible (muted, volume 0, or another stem soloed) the engine uses at most 2, so a voice with stereo reverb or doubles is removed more completely.
 
 ### Keyboard shortcuts
 
@@ -114,12 +114,12 @@ One STFT; every frequency bin is split by masks that sum to 1:
 
 | Stem | Mask | Idea |
 |---|---|---|
-| Drums | `d = 1 / (1 + (β²·H/P)^s)` | Median-filter HPSS (Fitzgerald 2010): percussion is a *vertical* line in the spectrogram, pitched sound a *horizontal* one |
+| Drums | `d = 1 / (1 + (β²·H/P)^s)` | Median-filter HPSS (Fitzgerald 2010): percussion is a *vertical* line in the spectrogram, pitched sound a *horizontal* one. Below the bass crossover, energy that rises well above its own median over time (`X̄ > κ²·H`) also counts as percussion — a kick is only a few bins wide, so the median over frequency cannot see it |
 | Bass | `(1−d) · low(f)` | Pitched content below ≈180 Hz |
-| Vocals | `(1−d) · band(f) · ψ^γ` | Pitched content in the *center* of the stereo image: ψ = 2·Re(S_LR)/(S_LL+S_RR) |
+| Vocals | `(1−d) · band(f) · ψ^γ` | Pitched content in the *center* of the stereo image: ψ = 2·Re(S_LR)/(S_LL+S_RR), smoothed with a two-sided window around the frame being processed (it reuses the look-ahead the time median already waits for, so ψ does not lag and costs no latency) |
 | Other | the rest | delayed input − the 3 stems above |
 
-Because "other" is computed by subtraction, **the 4 stems always sum back to the input** (measured error 3·10⁻⁸). Masks are shared by both channels, only 3 inverse FFTs run per frame, nothing is allocated in the audio callback, and there is no wasm-bindgen glue — the worklet calls the C ABI (`sep_*`) directly. Parameters were chosen with `dsp/build.sh tune` on a synthetic stereo mix.
+Because "other" is computed by subtraction, **the 4 stems always sum back to the input** (measured error 3·10⁻⁸). Masks are shared by both channels, only 3 inverse FFTs run per frame, nothing is allocated in the audio callback, and there is no wasm-bindgen glue — the worklet calls the C ABI (`sep_*`) directly. Non-finite input samples are treated as silence. Parameters were chosen with `dsp/build.sh tune` on two synthetic stereo mixes (a sparse one and a dense one), by per-stem SDR.
 
 ### AI separation
 

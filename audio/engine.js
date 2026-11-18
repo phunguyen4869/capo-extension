@@ -13,7 +13,7 @@
 //   Stretch được reset khi bật lại.
 
 import SignalsmithStretch from '../lib/SignalsmithStretch.mjs';
-import { QUALITY_PRESETS, STEM_NAMES, effectiveGains, mergeOptions, separatorPreset } from '../presets.js';
+import { QUALITY_PRESETS, STEM_NAMES, effectiveCenterWidth, effectiveGains, mergeOptions, separatorPreset } from '../presets.js';
 import { capoError } from '../i18n.js';
 import { createRecorder } from './recorder.js';
 import { createSeparatorNode } from './separator-node.js';
@@ -110,7 +110,7 @@ export async function createEngine(ctx, input, destination, { semitones = 0, opt
     const key = JSON.stringify(preset);
     if (sep && sepKey === key) return false;
     const old = sep;
-    sep = await createSeparatorNode(ctx, preset, { centerWidth: opts.centerWidth });
+    sep = await createSeparatorNode(ctx, preset, { centerWidth: effectiveCenterWidth(opts) });
     sepKey = key;
     if (old) {
       old.disconnect();
@@ -280,7 +280,8 @@ export async function createEngine(ctx, input, destination, { semitones = 0, opt
         await Promise.all([...stretches].map((st) => st.schedule({ formantCompensation: !!opts.formant })));
       }
       await route();
-      if (sep && opts.centerWidth !== prev.centerWidth) sep.setParams({ centerWidth: opts.centerWidth });
+      const centerWidth = effectiveCenterWidth(opts);
+      if (sep && centerWidth !== effectiveCenterWidth(prev)) sep.setParams({ centerWidth });
       applyVolumes();
     },
 

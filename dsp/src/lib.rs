@@ -3,6 +3,8 @@
 //! Một STFT duy nhất; mỗi bin được chia bằng các mask có tổng = 1:
 //!   d = mask percussive (HPSS, lọc trung vị — Fitzgerald 2010, margin kiểu Driedger 2014)
 //!       H = median theo thời gian (2K+1 frame), P = median theo tần số (2M+1 bin)
+//!       Dải thấp: P = max(P, low(f)·X̄ / κ²), X̄ = công suất quanh frame đó (trung bình ~30 ms). Thân kick chỉ
+//!       rộng vài bin nên median theo tần số không thấy nó; ở đây "vượt hẳn median theo thời gian" = percussive.
 //!       d = 1 / (1 + (β²·H / P)^s)
 //!   h = 1 − d                                  (phần có cao độ)
 //!   bass   = h · low(f)                        (dải thấp, crossover mềm quanh bass_cutoff)
@@ -10,6 +12,8 @@
 //!   other  = phần còn lại
 //! ψ = 2·Re(S_LR) / (S_LL + S_RR) là độ giống nhau L/R (biến thể cùng pha của Avendano & Jot 2002),
 //! S là phổ chéo làm mượt theo thời gian: ψ = 1 khi L = R (giữa), giảm khi lệch trái/phải hoặc lệch pha.
+//! Cửa sổ làm mượt là hàm mũ HAI PHÍA quanh frame đang xử lý — dùng luôn K frame "tương lai" đã phải chờ
+//! cho median theo thời gian, nên ψ không bị trễ so với tín hiệu và không tốn thêm latency.
 //!
 //! Tối ưu:
 //! - mọi mask dùng chung cho 2 kênh → median chỉ tính 1 lần, giữ ảnh stereo;
@@ -80,13 +84,21 @@ pub struct StemParams {
     pub vocal_high_hz: f32,
     /// γ: càng lớn thì chỉ những gì thật sự ở giữa mới vào lớp giọng.
     pub center_width: f32,
-    /// Hằng số thời gian làm mượt phổ chéo L/R (ms).
+    /// Hằng số thời gian làm mượt phổ chéo L/R (ms), mỗi phía; cửa sổ bị cắt ở ±K frame.
     pub center_smoothing_ms: f32,
+    /// κ: ở dải thấp, công suất phải vượt median theo thời gian bao nhiêu lần (biên độ) thì tính là trống.
+    pub transient_margin: f32,
 }
 
 impl Default for StemParams {
     fn default() -> Self {
-        Self { bass_cutoff_hz: 180.0, vocal_high_hz: 12000.0, center_width: 12.0, center_smoothing_ms: 50.0 }
+        Self {
+            bass_cutoff_hz: 180.0,
+            vocal_high_hz: 12000.0,
+            center_width: 4.0,
+            center_smoothing_ms: 50.0,
+            transient_margin: 2.0,
+        }
     }
 }
 
@@ -123,11 +135,14 @@ pub struct Separator {
     perc_med: Vec<f32>,
     median_tmp: Vec<f32>,
 
-    /// Phổ chéo làm mượt cho độ giống nhau L/R.
-    s_ll: Vec<f32>,
-    s_rr: Vec<f32>,
-    s_lr: Vec<Complex32>,
-    smooth_a: f32,
+    /// Re(L·conj(R)) của từng frame: [slot][bin] — tử số của độ giống nhau L/R.
+    cross: Vec<f32>,
+    /// Trọng số làm mượt theo khoảng cách (số frame) tới frame trung tâm: [0..=K]
+    smooth_w: Vec<f32>,
+    psi_num: Vec<f32>,
+    psi_den: Vec<f32>,
+    /// J: công suất dải thấp được lấy trung bình trên 2J+1 frame (≈ 30 ms) trước khi so với median.
+    trans_half: usize,
     band_low: Vec<f32>,
     band_vocal: Vec<f32>,
     /// Tỉ lệ năng lượng "nằm giữa" (0..1), làm mượt ~1 s — cho UI cảnh báo bài mono.
@@ -203,10 +218,11 @@ impl Separator {
             harm_med: zeros(bins),
             perc_med: zeros(bins),
             median_tmp: zeros(slots.max(2 * cfg.freq_half + 1)),
-            s_ll: zeros(bins),
-            s_rr: zeros(bins),
-            s_lr: vec![Complex32::new(0.0, 0.0); bins],
-            smooth_a: 0.0,
+            cross: zeros(slots * bins),
+            smooth_w: zeros(cfg.time_half + 1),
+            psi_num: zeros(bins),
+            psi_den: zeros(bins),
+            trans_half: ((0.015 * cfg.sample_rate / hop as f32).round() as usize).clamp(1, cfg.time_half),
             band_low: zeros(bins),
             band_vocal: zeros(bins),
             center_ratio: 0.0,
@@ -237,10 +253,16 @@ impl Separator {
             vocal_high_hz: fix(p.vocal_high_hz, 1000.0, nyquist, d.vocal_high_hz),
             center_width: fix(p.center_width, 0.5, 64.0, d.center_width),
             center_smoothing_ms: fix(p.center_smoothing_ms, 0.0, 1000.0, d.center_smoothing_ms),
+            transient_margin: fix(p.transient_margin, 1.0, 16.0, d.transient_margin),
         };
         self.params = p;
         let frame_ms = self.cfg.hop as f32 / self.cfg.sample_rate * 1000.0;
-        self.smooth_a = if p.center_smoothing_ms > 0.0 { (-frame_ms / p.center_smoothing_ms).exp() } else { 0.0 };
+        let a = if p.center_smoothing_ms > 0.0 { (-frame_ms / p.center_smoothing_ms).exp() } else { 0.0 };
+        let mut w = 1.0;
+        for v in self.smooth_w.iter_mut() {
+            *v = w;
+            w *= a;
+        }
         let df = self.cfg.sample_rate / self.cfg.fft_size as f32;
         for k in 0..self.bins {
             let f = k as f32 * df;
@@ -259,9 +281,7 @@ impl Separator {
         self.ready.iter_mut().for_each(clear);
         self.spec.fill(Complex32::new(0.0, 0.0));
         self.power.fill(0.0);
-        self.s_ll.fill(0.0);
-        self.s_rr.fill(0.0);
-        self.s_lr.fill(Complex32::new(0.0, 0.0));
+        self.cross.fill(0.0);
         self.center_ratio = 0.0;
         self.fill = 0;
         self.delay_pos = 0;
@@ -280,9 +300,11 @@ impl Separator {
             let base = fft - hop + self.fill;
             for c in 0..CHANNELS {
                 let src = &self.io_in[c][pos..pos + chunk];
-                self.in_buf[c][base..base + chunk].copy_from_slice(src);
                 let mut d = self.delay_pos;
-                for &x in src {
+                for (dst, &x) in self.in_buf[c][base..base + chunk].iter_mut().zip(src) {
+                    // NaN/Inf sẽ làm hỏng mọi frame chứa nó (và cả lớp OTHER) → coi như im lặng.
+                    let x = if x.is_finite() { x } else { 0.0 };
+                    *dst = x;
                     self.delay[c][d] = x;
                     d += 1;
                     if d == delay_len {
@@ -329,6 +351,10 @@ impl Separator {
                     *p += x.norm_sqr();
                 }
             }
+            let (l, r) = self.spec[ws * CHANNELS * bins..(ws * CHANNELS + 2) * bins].split_at(bins);
+            for ((x, l), r) in self.cross[ws * bins..(ws + 1) * bins].iter_mut().zip(l).zip(r) {
+                *x = l.re * r.re + l.im * r.im;
+            }
         }
         self.write_slot = (ws + 1) % slots;
         // Frame trung tâm: cách frame mới nhất K frame (cần K frame "tương lai" cho median thời gian).
@@ -371,32 +397,54 @@ impl Separator {
             Some(g) => psi.powi(g),
             None => psi.powf(gamma),
         };
-        let a = self.smooth_a;
-        let l_off = (center * CHANNELS) * bins;
-        let r_off = (center * CHANNELS + 1) * bins;
+        // Phổ chéo làm mượt hai phía quanh frame trung tâm: ψ = 2·Σw·Re(L·R*) / Σw·(|L|² + |R|²).
+        self.psi_num.fill(0.0);
+        self.psi_den.fill(0.0);
+        for j in 0..slots {
+            let w = self.smooth_w[j.abs_diff(time_half)];
+            if w == 0.0 {
+                continue;
+            }
+            let s = (center + slots - time_half + j) % slots;
+            let cross = &self.cross[s * bins..(s + 1) * bins];
+            let power = &self.power[s * bins..(s + 1) * bins];
+            for (((num, den), &x), &p) in self.psi_num.iter_mut().zip(self.psi_den.iter_mut()).zip(cross).zip(power) {
+                *num += w * x;
+                *den += w * p;
+            }
+        }
+        let kappa = 1.0 / (self.params.transient_margin * self.params.transient_margin);
+        let th = self.trans_half;
+        let trans_norm = kappa / (2 * th + 1) as f32;
         let (mut centered, mut total) = (0.0f32, 0.0f32);
         for k in 0..bins {
-            let p = self.perc_med[k];
+            let x = cp[k];
+            let low = self.band_low[k];
+            // Dải thấp: công suất vượt hẳn median theo thời gian cũng là bằng chứng percussive (kick).
+            // Lấy trung bình ~30 ms: frame ngắn hơn chu kỳ nốt bass thấy từng xung của sóng, không phải transient.
+            let mut p = self.perc_med[k];
+            if low > 1e-3 {
+                let mut acc = 0.0;
+                for j in 0..=2 * th {
+                    acc += self.power[((center + slots - th + j) % slots) * bins + k];
+                }
+                p = p.max(low * acc * trans_norm);
+            }
             let h_med = self.harm_med[k] * m2;
             let drums = if p > 1e-30 { 1.0 / (1.0 + shape(h_med / p, sharpness)) } else { 0.0 };
             let harmonic = 1.0 - drums;
 
-            let l = self.spec[l_off + k];
-            let r = self.spec[r_off + k];
-            self.s_ll[k] = a * self.s_ll[k] + (1.0 - a) * l.norm_sqr();
-            self.s_rr[k] = a * self.s_rr[k] + (1.0 - a) * r.norm_sqr();
-            self.s_lr[k] = self.s_lr[k] * a + l * r.conj() * (1.0 - a);
-            let denom = self.s_ll[k] + self.s_rr[k];
+            let den = self.psi_den[k];
             // Dùng phần thực (cùng pha) thay vì |S_LR|: hai kênh tương quan nhưng lệch pha
             // (stereo rộng, chorus, detune) không được tính là "ở giữa".
-            let psi = if denom > 1e-30 { (2.0 * self.s_lr[k].re / denom).clamp(0.0, 1.0) } else { 0.0 };
+            let psi = if den > 1e-30 { (2.0 * self.psi_num[k] / den).clamp(0.0, 1.0) } else { 0.0 };
 
             let vband = self.band_vocal[k];
             self.gains[DRUMS][k] = drums;
-            self.gains[BASS][k] = harmonic * self.band_low[k];
+            self.gains[BASS][k] = harmonic * low;
             self.gains[VOCALS][k] = harmonic * vband * center_pow(psi);
 
-            let e = (l.norm_sqr() + r.norm_sqr()) * harmonic * vband;
+            let e = x * harmonic * vband;
             centered += e * psi;
             total += e;
         }
@@ -535,7 +583,7 @@ pub unsafe extern "C" fn sep_set_params(
     center_smoothing_ms: f32,
 ) {
     if let Some(s) = unsafe { s.as_mut() } {
-        s.set_params(StemParams { bass_cutoff_hz, vocal_high_hz, center_width, center_smoothing_ms });
+        s.set_params(StemParams { bass_cutoff_hz, vocal_high_hz, center_width, center_smoothing_ms, ..StemParams::default() });
     }
 }
 
@@ -696,6 +744,96 @@ mod tests {
             e_all += (0..STEMS).map(|s| hp(&out[s][1], at + lat)).sum::<f32>();
         }
         assert!(e_d / e_all > 0.85, "clicks → drums: {}", e_d / e_all);
+    }
+
+    /// Kick tổng hợp: thân quét 160 → 50 Hz tắt trong ~50 ms + tiếng "tách", mỗi 0.5 s.
+    fn kick(len: usize) -> Vec<f32> {
+        let mut rnd = noise(len, 5).into_iter();
+        let mut phase = 0.0f32;
+        (0..len)
+            .map(|i| {
+                let t = (i as f32 / SR) % 0.5;
+                if t < 1.0 / SR {
+                    phase = 0.0;
+                }
+                phase = (phase + (50.0 + 110.0 * (-t / 0.03).exp()) / SR).fract();
+                let body = (2.0 * std::f32::consts::PI * phase).sin() * (-t / 0.05).exp() * 0.6;
+                body + rnd.next().unwrap() * (-t / 0.004).exp() * 0.3
+            })
+            .collect()
+    }
+
+    #[test]
+    fn kick_goes_to_drums_and_bass_stays() {
+        let len = 48000 * 4;
+        let lat = CFG.latency();
+        let k = kick(len);
+        let out = run(CFG, &k, &k);
+        let d = share(&out[DRUMS], &k, lat, 0);
+        assert!(d > 0.5, "kick → drums: {d}");
+
+        // bass răng cưa (40 bồi âm), đổi nốt mỗi 0.5 s
+        let notes = [55.0, 73.42, 82.41, 61.74];
+        let mut phase = 0.0f32;
+        let bass: Vec<f32> = (0..len)
+            .map(|i| {
+                phase = (phase + notes[i / 24000 % 4] / SR).fract();
+                (1..=40).map(|h| (2.0 * std::f32::consts::PI * phase * h as f32).sin() / h as f32).sum::<f32>() * 0.25
+            })
+            .collect();
+        let out = run(CFG, &bass, &bass);
+        let (b, d) = (share(&out[BASS], &bass, lat, 0), share(&out[DRUMS], &bass, lat, 0));
+        assert!(b > 0.72, "bass → bass: {b}");
+        assert!(d < 0.05, "bass lọt vào drums: {d}");
+    }
+
+    #[test]
+    fn vocals_follow_pan_change_quickly() {
+        // 440 Hz chỉ bên trái, sau 2 s chuyển vào giữa: lớp giọng phải đạt −6 dB trong ≤ 50 ms.
+        let (len, switch) = (48000 * 4, 48000 * 2);
+        let lat = CFG.latency();
+        let l = tone(len, 440.0, 0.3);
+        let r: Vec<f32> = (0..len).map(|i| if i >= switch { l[i] } else { 0.0 }).collect();
+        let out = run(CFG, &l, &r);
+        let y = &out[VOCALS][0];
+        let rms = |from: usize| (y[from..from + 480].iter().map(|v| v * v).sum::<f32>() / 480.0).sqrt();
+        let steady = rms(len - 4800);
+        assert!(rms(switch + lat - 4800) < 0.05 * steady, "trước khi chuyển: {}", rms(switch + lat - 4800) / steady);
+        // cửa sổ RMS 10 ms có tâm ở switch + 50 ms
+        let at = rms(switch + lat + 2400 - 240);
+        assert!(at > 0.5 * steady, "50 ms sau khi chuyển: {}", at / steady);
+    }
+
+    #[test]
+    fn recovers_from_non_finite_input() {
+        let len = 48000 * 2;
+        let clean = tone(len, 440.0, 0.3);
+        let mut bad = clean.clone();
+        bad[1000] = f32::NAN;
+        bad[1001] = f32::INFINITY;
+        let ok = run(CFG, &clean, &clean);
+        let out = run(CFG, &bad, &bad);
+        for s in 0..STEMS {
+            assert!(out[s][0].iter().all(|v| v.is_finite()), "lớp {s} có mẫu không hữu hạn");
+        }
+        let energy = |o: &[Vec<Vec<f32>>]| o[VOCALS][0][len - 48000..].iter().map(|v| v * v).sum::<f32>();
+        let ratio = energy(&out) / energy(&ok);
+        assert!((0.99..1.01).contains(&ratio), "năng lượng lớp giọng sau NaN / bình thường = {ratio}");
+    }
+
+    #[test]
+    fn synthesis_gain_is_unity() {
+        // OTHER = input − 3 lớp kia nên `stems_sum_to_input` không thấy được sai hệ số tổng hợp:
+        // một tone ở giữa phải nằm trọn trong lớp giọng với gain 1, OTHER gần như rỗng.
+        let len = 48000 * 2;
+        let lat = CFG.latency();
+        let x = tone(len, 440.0, 0.3);
+        let out = run(CFG, &x, &x);
+        let v = share(&out[VOCALS], &x, lat, 0);
+        assert!((0.97..1.01).contains(&v), "tone giữa → vocals: {v}");
+        let energy = |y: &[f32]| y[48000..].iter().map(|v| v * v).sum::<f32>();
+        let rest = energy(&out[OTHER][0]) / energy(&x);
+        assert!(rest < 1e-3, "năng lượng OTHER / input = {rest}");
     }
 
     #[test]
