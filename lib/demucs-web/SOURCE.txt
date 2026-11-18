@@ -1,0 +1,5 @@
+demucs-web 1.0.2 (npm) — https://github.com/timcsy/demucs-web
+Files: index.js, processor.js, fft.js, constants.js (không sửa đổi)
+License: xem LICENSE (MIT).
+Model (tải khi dùng lần đầu, không đóng gói): huggingface.co/timcsy/demucs-web-onnx @ 92e33df61cfc9eb820272aaa62d2ef6dcf4d950d,
+dựa trên HTDemucs của Meta (facebookresearch/demucs, MIT).

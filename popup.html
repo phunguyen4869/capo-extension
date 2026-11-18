@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>CAPO</title>
+    <link rel="icon" href="icons/icon-32.png" />
+    <link rel="stylesheet" href="popup.css" />
+    <script type="module" src="popup.js"></script>
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <h1><img class="logo" src="icons/icon-small.svg" width="18" height="18" alt="" />CAPO</h1>
+        <span id="pill" class="pill" role="status"><span class="dot"></span><span id="pill-text">Off</span></span>
+      </div>
+      <button id="power" class="power" aria-pressed="false">Turn on</button>
+    </header>
+    <p id="tab-title" class="tab-title muted">…</p>
+    <p id="message" class="message" role="alert" hidden></p>
+
+    <section class="card pitch" data-i18n-aria-label="pitch.section" aria-label="Transpose">
+      <div class="pitch-row">
+        <button id="down" class="step" data-i18n-title="pitch.downTitle" data-i18n-aria-label="pitch.down">−</button>
+        <div class="readout" aria-live="polite">
+          <span id="value">0</span>
+          <span id="unit" class="unit">semitones</span>
+        </div>
+        <button id="up" class="step" data-i18n-title="pitch.upTitle" data-i18n-aria-label="pitch.up">+</button>
+      </div>
+      <input id="semis" type="range" min="-12" max="12" step="1" value="0" list="semis-ticks" data-i18n-aria-label="pitch.slider" />
+      <datalist id="semis-ticks">
+        <option value="-12"></option><option value="-7"></option><option value="-5"></option>
+        <option value="0"></option><option value="5"></option><option value="7"></option><option value="12"></option>
+      </datalist>
+      <div class="fine">
+        <label for="cents" data-i18n="pitch.fine">Fine-tune</label>
+        <input id="cents" type="range" min="-50" max="50" step="1" value="0" list="cents-ticks" />
+        <datalist id="cents-ticks"><option value="0"></option></datalist>
+        <span class="num"><b id="cents-value">0</b> <span data-i18n="pitch.cents">cents</span></span>
+        <button id="reset" class="ghost" data-i18n="pitch.reset" data-i18n-title="pitch.resetTitle">Reset</button>
+      </div>
+    </section>
+
+    <section class="card stems" data-i18n-aria-label="stems.section" aria-label="Stem separation">
+      <label class="switch-row">
+        <span>
+          <b data-i18n="stems.title">Stem separation</b>
+          <span class="muted small block" data-i18n="stems.subtitle">4 stems · adds ≈85 ms latency</span>
+        </span>
+        <input id="separate" type="checkbox" role="switch" class="switch" />
+      </label>
+      <div id="stem-list" class="stem-list" hidden>
+        <div class="stem-head muted small" aria-hidden="true">
+          <span></span><span data-i18n="stems.volume">Volume</span><span></span>
+          <span data-i18n="stems.mute" data-i18n-title="stems.muteTitle">Mute</span>
+          <span data-i18n="stems.solo" data-i18n-title="stems.soloTitle">Solo</span>
+          <span data-i18n="stems.key" data-i18n-title="stems.keyTitle">Key</span>
+        </div>
+      </div>
+      <p id="mono-warning" class="warn small" data-i18n="stems.monoWarning" hidden></p>
+    </section>
+
+    <section class="actions">
+      <button id="record">
+        <span class="rec-dot" aria-hidden="true"></span><span id="record-label">Record stems</span>
+      </button>
+      <button id="open-ai" data-i18n="ai.open" data-i18n-title="ai.openTitle">✦ AI separation…</button>
+    </section>
+
+    <details>
+      <summary data-i18n="opt.title">Options</summary>
+      <label class="field">
+        <span>🌐 <span data-i18n="opt.language">Language</span></span>
+        <select id="language"></select>
+      </label>
+      <label class="field">
+        <span data-i18n="opt.mode">Processing mode</span>
+        <select id="quality">
+          <option value="default" data-i18n="opt.mode.default">High quality</option>
+          <option value="lowLatency" data-i18n="opt.mode.lowLatency">Low latency (for video)</option>
+          <option value="cheaper" data-i18n="opt.mode.cheaper">Save CPU (pitch shift only)</option>
+        </select>
+      </label>
+      <label class="check">
+        <input id="formant" type="checkbox" />
+        <span data-i18n="opt.formant">Preserve formants</span>
+      </label>
+      <label class="field">
+        <span><span data-i18n="opt.center">Vocal focus</span> <b id="center-value" class="num">12</b></span>
+        <input id="center" type="range" min="2" max="24" step="1" value="12" />
+        <span class="muted small" data-i18n="opt.centerHint"></span>
+      </label>
+    </details>
+
+    <p class="muted small footer" data-i18n="footer.shortcuts"></p>
+  </body>
+</html>

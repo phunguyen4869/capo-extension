@@ -1,0 +1,22 @@
+[package]
+name = "capo-dsp"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Real-time harmonic/percussive separation (HPSS) for the CAPO extension, compiled to WASM."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+realfft = "3.5"
+# wasm_simd: dùng SIMD128 cho FFT khi build wasm32 (cần -C target-feature=+simd128, xem .cargo/config.toml)
+rustfft = { version = "6.4", features = ["wasm_simd"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

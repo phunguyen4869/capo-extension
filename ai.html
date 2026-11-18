@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CAPO AI</title>
+    <link rel="icon" href="icons/icon-32.png" />
+    <link rel="stylesheet" href="ai.css" />
+    <script type="module" src="ai.js"></script>
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div class="hero-top">
+          <h1><img class="logo" src="icons/icon.svg" width="36" height="36" alt="" />CAPO AI</h1>
+          <label class="lang">
+            <span aria-hidden="true">🌐</span>
+            <select id="language" data-i18n-aria-label="opt.language" aria-label="Language"></select>
+          </label>
+        </div>
+        <p class="lead muted" data-i18n="aipage.lead"></p>
+      </header>
+
+      <section class="card">
+        <h2><span class="step" id="step-model">1</span><span data-i18n="aipage.model">Model</span></h2>
+        <p id="model-status" data-i18n="aipage.checking">Checking…</p>
+        <div class="progress" id="model-progress" hidden><div></div></div>
+        <div class="row">
+          <button id="model-download" class="primary" data-i18n="aipage.download" hidden></button>
+          <button id="model-cancel" data-i18n="aipage.cancel" hidden></button>
+          <button id="model-delete" class="subtle" data-i18n="aipage.deleteModel" hidden></button>
+        </div>
+        <p class="muted small" id="model-source"></p>
+      </section>
+
+      <section class="card">
+        <h2><span class="step" id="step-source">2</span><span data-i18n="aipage.source">Audio source</span></h2>
+        <div class="options" role="radiogroup" data-i18n-aria-label="aipage.sourceGroup">
+          <label class="option" id="choice-recording" hidden>
+            <input type="radio" name="source" value="recording" />
+            <span><b data-i18n="aipage.latestRecording"></b><span id="recording-info" class="muted small block"></span></span>
+          </label>
+          <label class="option">
+            <input type="radio" name="source" value="file" />
+            <span><b data-i18n="aipage.audioFile"></b><span id="file-info" class="muted small block"></span></span>
+          </label>
+        </div>
+        <label class="drop" id="drop">
+          <input type="file" id="file" class="visually-hidden" accept="audio/*,.wav,.mp3,.flac,.ogg,.m4a" />
+          <span><span data-i18n="aipage.drop"></span> <span class="link" data-i18n="aipage.choose"></span></span>
+          <span class="muted small" data-i18n="aipage.formats"></span>
+        </label>
+      </section>
+
+      <section class="card">
+        <h2><span class="step" id="step-run">3</span><span data-i18n="aipage.separate">Separate</span></h2>
+        <div class="row">
+          <label class="inline">
+            <span data-i18n="aipage.processor"></span>
+            <select id="backend">
+              <option value="auto" data-i18n="aipage.auto"></option>
+              <option value="wasm" data-i18n="aipage.cpu"></option>
+            </select>
+          </label>
+          <span id="gpu-info" class="muted small"></span>
+        </div>
+        <div class="row">
+          <button id="run" class="primary" data-i18n="aipage.run" disabled></button>
+          <button id="cancel" data-i18n="aipage.stop" hidden></button>
+          <span id="run-info" class="muted small num" aria-live="polite"></span>
+        </div>
+        <div class="progress" id="run-progress" hidden><div></div></div>
+      </section>
+
+      <section class="card" id="results" hidden>
+        <h2 data-i18n="aipage.results">Results</h2>
+        <div id="stem-results"></div>
+        <div class="row">
+          <button id="download-all" class="primary" data-i18n="aipage.downloadAll"></button>
+          <button id="show-folder" data-i18n="aipage.showFolder" hidden></button>
+          <span id="download-info" class="muted small"></span>
+        </div>
+      </section>
+
+      <p id="error" class="error" role="alert" hidden></p>
+    </main>
+  </body>
+</html>

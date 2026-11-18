@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- CAPO — dấu thăng (♯): thân dọc mảnh lệch nhau, hai thanh ngang dày nghiêng lên như ký hiệu trong bản nhạc.
+       Bản cho 48 px trở lên. Bản 16–32 px: icon-small.svg. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff7a2f"/>
+      <stop offset="1" stop-color="#d9480f"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+  <g fill="#fff">
+    <rect x="49" y="24" width="7" height="88" rx="2"/>
+    <rect x="72" y="16" width="7" height="88" rx="2"/>
+    <path d="M33 56 L95 39 L95 57 L33 74 Z"/>
+    <path d="M33 84 L95 67 L95 85 L33 102 Z"/>
+  </g>
+</svg>

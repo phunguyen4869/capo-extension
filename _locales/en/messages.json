@@ -1,0 +1,22 @@
+{
+  "extName": {
+    "message": "CAPO",
+    "description": "Extension name"
+  },
+  "extDescription": {
+    "message": "Change the pitch of any tab's audio without changing its speed, separate stems, and record them.",
+    "description": "Extension description"
+  },
+  "cmdUp": {
+    "message": "Up 1 semitone",
+    "description": "Keyboard shortcut"
+  },
+  "cmdDown": {
+    "message": "Down 1 semitone",
+    "description": "Keyboard shortcut"
+  },
+  "cmdReset": {
+    "message": "Back to the original key (0)",
+    "description": "Keyboard shortcut"
+  }
+}

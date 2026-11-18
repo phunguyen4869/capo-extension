@@ -1,0 +1,16 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# Rust build (build.sh builds into ~/.cache/capo-dsp-target; this covers a plain `cargo build` in dsp/)
+dsp/target/
+
+# Node
+node_modules/
+
+# AI model is downloaded at runtime — never commit it
+*.onnx
+*.part

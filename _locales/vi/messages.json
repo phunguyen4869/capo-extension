@@ -1,0 +1,22 @@
+{
+  "extName": {
+    "message": "CAPO",
+    "description": "Tên extension"
+  },
+  "extDescription": {
+    "message": "Đổi tông âm thanh của tab mà giữ nguyên tốc độ, tách lớp nhạc cụ và ghi lại.",
+    "description": "Mô tả extension"
+  },
+  "cmdUp": {
+    "message": "Tăng 1 bán cung",
+    "description": "Phím tắt"
+  },
+  "cmdDown": {
+    "message": "Giảm 1 bán cung",
+    "description": "Phím tắt"
+  },
+  "cmdReset": {
+    "message": "Về tông gốc (0)",
+    "description": "Phím tắt"
+  }
+}
