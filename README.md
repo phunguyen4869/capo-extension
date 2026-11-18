@@ -182,6 +182,17 @@ cd dsp
 
 Cargo's build directory is `~/.cache/capo-dsp-target`, outside the extension folder.
 
+### Package for sharing
+
+```bash
+node scripts/package.mjs    # → dist/capo-<version>.zip
+```
+
+The ZIP contains only runtime files (no `dsp/`, `tests/`, `scripts/`, `docs/`) plus an `INSTALL.txt` with
+install steps in English and Vietnamese. The script checks that every file referenced by the manifest, HTML
+and JS imports is included, and the output is reproducible (same source ⇒ same SHA-256). Recipients unzip it
+and use **Load unpacked**; the same ZIP can be uploaded to the Chrome Web Store.
+
 ### Tests
 
 ```bash
