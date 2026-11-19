@@ -9,10 +9,12 @@ export const QUALITY_PRESETS = {
 
 // Bộ tách lớp (Rust/WASM) — giá trị cho 44.1/48 kHz. Latency = fftSize + timeHalf·hop mẫu.
 // Chọn bằng `dsp/build.sh tune` (dsp/examples/tune.rs).
+// default/lowLatency dùng FFT dài, chồng lấp 75 %: bin hẹp gấp đôi (23/47 Hz) nên nốt bass, kick và bồi âm tách
+// nhau rõ hơn mà độ trễ không đổi; đổi lại bộ tách tốn CPU ≈ 1,5 lần → `cheaper` giữ FFT ngắn, chồng lấp 50 %.
 export const SEPARATOR_PRESETS = {
-  default: { fftSize: 1024, hop: 512, timeHalf: 6, freqHalf: 32, margin: 1.0, sharpness: 3 }, // ≈ 85 ms
-  cheaper: { fftSize: 1024, hop: 512, timeHalf: 6, freqHalf: 32, margin: 1.0, sharpness: 3 },
-  lowLatency: { fftSize: 512, hop: 256, timeHalf: 8, freqHalf: 16, margin: 1.0, sharpness: 3 }, // ≈ 53 ms
+  default: { fftSize: 2048, hop: 512, timeHalf: 4, freqHalf: 24, margin: 0.92, sharpness: 3 }, // ≈ 85 ms
+  cheaper: { fftSize: 1024, hop: 512, timeHalf: 6, freqHalf: 32, margin: 1.0, sharpness: 3 }, // ≈ 85 ms
+  lowLatency: { fftSize: 1024, hop: 256, timeHalf: 6, freqHalf: 32, margin: 0.95, sharpness: 3 }, // ≈ 53 ms
 };
 
 /** Preset đã nhân đôi kích thước khi sample rate cao (88.2/96 kHz) để giữ cùng độ phân giải theo Hz/ms. */
@@ -76,6 +78,14 @@ export const KARAOKE_CENTER_WIDTH = 2;
 export function effectiveCenterWidth(options) {
   const vocalsAudible = effectiveGains(options.stems).vocals > 0;
   return vocalsAudible ? options.centerWidth : Math.min(options.centerWidth, KARAOKE_CENTER_WIDTH);
+}
+
+/**
+ * Tham số đưa cho bộ tách. `karaoke` (lớp giọng không nghe được): bộ tách trích phần giữa bằng lọc không gian
+ * trước khi áp mask — lấy được nhiều giọng hơn khỏi các lớp đang phát (dsp/src/lib.rs).
+ */
+export function separatorParams(options) {
+  return { centerWidth: effectiveCenterWidth(options), karaoke: !(effectiveGains(options.stems).vocals > 0) };
 }
 
 /** Gain thực tế của từng lớp sau khi áp mute/solo. */

@@ -68,7 +68,9 @@ After editing code, click ↻ **Reload** on the CAPO card in `chrome://extension
 
 Add your audio device's own latency. The video is not delayed, so the sound lags the picture by that amount.
 
-**Vocal focus** (2–24, default 4): higher values make the vocal stem cleaner, at the risk of leaving some vocals in other stems. While the vocal stem is not audible (muted, volume 0, or another stem soloed) the engine uses at most 2, so a voice with stereo reverb or doubles is removed more completely.
+*High quality* and *Low latency* run the stem separator with a longer FFT and 75 % overlap (finer frequency resolution at the same latency); *Save CPU* keeps the lighter 50 %-overlap separator.
+
+**Vocal focus** (2–24, default 4): higher values make the vocal stem cleaner, at the risk of leaving some vocals in other stems. While the vocal stem is not audible (muted, volume 0, or another stem soloed) the engine uses at most 2 and switches the separator to *karaoke mode* (a spatial filter instead of a plain mask, see below), so a voice with stereo reverb or doubles, or one buried under wide instruments, is removed more completely.
 
 ### Keyboard shortcuts
 
@@ -119,7 +121,17 @@ One STFT; every frequency bin is split by masks that sum to 1:
 | Vocals | `(1−d) · band(f) · ψ^γ` | Pitched content in the *center* of the stereo image: ψ = 2·Re(S_LR)/(S_LL+S_RR), smoothed with a two-sided window around the frame being processed (it reuses the look-ahead the time median already waits for, so ψ does not lag and costs no latency) |
 | Other | the rest | delayed input − the 3 stems above |
 
+**Karaoke mode** (vocal stem not audible). The mask `ψ^γ` gives up a whole bin when the voice shares it with a panned or wide instrument, so that part of the voice stays in "other". Karaoke mode first pulls the center out of each bin with an MVDR beamformer steered at the center — `C = w_L·L + w_R·R`, `w_L + w_R = 1`, weights minimising the output power (computed from the same smoothed S_LL, S_RR, S_LR, with diagonal loading) — followed by a Wiener post-filter; an off-center instrument in the same bin is nulled instead of dragging the voice along. What is left of the bin is then split by `ψ^γ` as usual, so a lone source is treated exactly as before. On the dense benchmark mix this removes 89 % of the voice instead of 82 % (same settings, mask only) for about 2 points more accompaniment lost.
+
 Because "other" is computed by subtraction, **the 4 stems always sum back to the input** (measured error 3·10⁻⁸). Masks are shared by both channels, only 3 inverse FFTs run per frame, nothing is allocated in the audio callback, and there is no wasm-bindgen glue — the worklet calls the C ABI (`sep_*`) directly. Non-finite input samples are treated as silence. Parameters were chosen with `dsp/build.sh tune` on two synthetic stereo mixes (a sparse one and a dense one), by per-stem SDR.
+
+| Mode | STFT (at 44.1/48 kHz) | Separator latency | Mean SDR on the benchmark |
+|---|---|---|---|
+| High quality | 2048-point FFT, hop 512 (75 % overlap), time median over 9 frames | 4096 samples ≈ 85 ms | 4.2 dB |
+| Save CPU | 1024-point FFT, hop 512 (50 % overlap), time median over 13 frames | 4096 samples ≈ 85 ms | 3.7 dB |
+| Low latency | 1024-point FFT, hop 256 (75 % overlap), time median over 13 frames | 2560 samples ≈ 53 ms | 3.3 dB |
+
+The longer FFT halves the bin width (23 Hz instead of 47 Hz), which separates bass notes, kick and harmonics better; the latency stays the same because the time median needs fewer look-ahead frames.
 
 ### AI separation
 
@@ -135,8 +147,8 @@ Measured with `OfflineAudioContext` (20 s of audio):
 |---|---|
 | Transpose, no separation | 65× real time |
 | No separation, 0 semitones (bypass) | 735× |
-| Stem separation, 3 transposed stems | 30× (≈3 % of one CPU core) |
-| Stem separator alone | 57× |
+| Stem separation, 3 transposed stems | 23× (≈4 % of one CPU core) |
+| Stem separator alone | 38× |
 | AI separation, CPU, single thread | ≈0.35× real time (a 4-minute song takes ≈11 minutes; WebGPU is much faster) |
 
 ## Development
@@ -211,7 +223,7 @@ node tests/capture-e2e.mjs  # end-to-end: real tab capture → separation → +2
 | `pitch` | 440 Hz sine through −12…+12 semitones in every mode, error < 0.5 % |
 | `tempo` | a 0.5 s beat is still 0.5 s after transposing |
 | `drumsKeepPitch` | snare spectral centroid ×1.38 when transposed, ×1.02 when drums keep their key |
-| `stemControls` | mute/solo (> 15 dB), 50 % volume (−6 dB), per-stem transpose |
+| `stemControls` | mute/solo (> 15 dB), 50 % volume (−6 dB), per-stem transpose, karaoke mode (more of a voice under a wide chord is removed than by the mask) |
 | `recording` | 5 valid WAV files; stems sum to the mix (≤ 4 LSB) |
 | `benchmark` | render speed vs. real time |
 

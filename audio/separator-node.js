@@ -28,7 +28,8 @@ function loadWorklet(ctx) {
 /**
  * @param {BaseAudioContext} ctx
  * @param {{fftSize:number, hop:number, timeHalf:number, freqHalf:number, margin:number, sharpness:number}} preset
- * @param {{centerWidth?:number, bassCutoffHz?:number, vocalHighHz?:number, centerSmoothingMs?:number}} [params]
+ * @param {{centerWidth?:number, bassCutoffHz?:number, vocalHighHz?:number, centerSmoothingMs?:number, karaoke?:boolean}} [params]
+ *   mỗi lần đặt là đặt lại TẤT CẢ: tham số bị bỏ trống quay về mặc định
  * @returns {Promise<AudioWorkletNode & {latencySamples:number, stats:{centerRatio:number}, setParams(p:object):void}>}
  *   output 0 trống · 1 bass · 2 giọng hát · 3 nhạc cụ khác
  */

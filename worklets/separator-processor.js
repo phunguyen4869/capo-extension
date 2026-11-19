@@ -37,7 +37,9 @@ class CapoSeparatorProcessor extends AudioWorkletProcessor {
 
   setParams(p) {
     // NaN ⇒ Rust dùng giá trị mặc định.
-    this.ex.sep_set_params(this.ptr, p.bassCutoffHz ?? NaN, p.vocalHighHz ?? NaN, p.centerWidth ?? NaN, p.centerSmoothingMs ?? NaN);
+    this.ex.sep_set_params(
+      this.ptr, p.bassCutoffHz ?? NaN, p.vocalHighHz ?? NaN, p.centerWidth ?? NaN, p.centerSmoothingMs ?? NaN, p.karaoke ? 1 : 0,
+    );
   }
 
   bindViews() {

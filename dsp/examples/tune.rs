@@ -2,7 +2,8 @@
 //!   giọng (giữa, vibrato) · guitar (lệch trái) · pad (stereo rộng) · bass (giữa)
 //!   · trống (kick + snare giữa, hi-hat lệch phải)
 //!   · mix "dày" thêm một hợp âm stereo rộng phủ lên dải giọng (phổ chồng nhau như nhạc thật).
-//! In ra SDR (dB) của từng lớp so với nguồn gốc, tỉ lệ giọng giữ được trong lớp giọng và phần nhạc cụ lọt vào đó.
+//! In ra SDR (dB) của từng lớp so với nguồn gốc, tỉ lệ giọng giữ được trong lớp giọng và phần nhạc cụ lọt vào đó;
+//! sau đó so chế độ karaoke (MVDR) với mask γ = 2, và các cấu hình STFT trong presets.js.
 //!
 //!   ./build.sh tune     (hoặc: cargo run --release --example tune)
 
@@ -170,8 +171,13 @@ fn sdr(out: &[Vec<Vec<f32>>], stem: usize, srcs: &[Source], lat: usize) -> f32 {
     (10.0 * (num / den).log10()) as f32
 }
 
+/// = SEPARATOR_PRESETS trong presets.js
+const DEFAULT: Config = Config { sample_rate: SR, fft_size: 2048, hop: 512, time_half: 4, freq_half: 24, margin: 0.92, sharpness: 3.0 };
+const CHEAPER: Config = Config { sample_rate: SR, fft_size: 1024, hop: 512, time_half: 6, freq_half: 32, margin: 1.0, sharpness: 3.0 };
+const LOW_LATENCY: Config = Config { sample_rate: SR, fft_size: 1024, hop: 256, time_half: 6, freq_half: 32, margin: 0.95, sharpness: 3.0 };
+
 fn main() {
-    let cfg = Config { sample_rate: SR, fft_size: 1024, hop: 512, time_half: 6, freq_half: 32, margin: 1.0, sharpness: 3.0 };
+    let cfg = DEFAULT;
     let lat = cfg.latency();
     let d = StemParams::default();
     let mut cases = vec![("mặc định".to_string(), d)];
@@ -185,19 +191,25 @@ fn main() {
         cases.push((format!("κ{k}"), StemParams { transient_margin: k, ..d }));
     }
     let mixes: Vec<Vec<Source>> = vec![sources(false), sources(true)];
+    let inputs: Vec<(Vec<f32>, Vec<f32>)> = mixes
+        .iter()
+        .map(|srcs| {
+            let sum = |pick: fn(&Source) -> &Vec<f32>| (0..LEN).map(|i| srcs.iter().map(|s| pick(s)[i]).sum()).collect();
+            (sum(|s| &s.left), sum(|s| &s.right))
+        })
+        .collect();
+    let mix_name = |m: usize| if m == 0 { "thưa" } else { "dày" };
     let mut totals = vec![0.0f32; cases.len()];
 
-    for (m, srcs) in mixes.iter().enumerate() {
-        let left: Vec<f32> = (0..LEN).map(|i| srcs.iter().map(|s| s.left[i]).sum()).collect();
-        let right: Vec<f32> = (0..LEN).map(|i| srcs.iter().map(|s| s.right[i]).sum()).collect();
-        println!("\n== mix {} — SDR (dB) ==", if m == 0 { "thưa" } else { "dày" });
+    for (m, (srcs, (left, right))) in mixes.iter().zip(&inputs).enumerate() {
+        println!("\n== mix {} — SDR (dB) ==", mix_name(m));
         println!(
             "{:<12}{:>8}{:>8}{:>8}{:>8}{:>8}{:>16}{:>16}{:>16}",
             "tham số", "drums", "bass", "vocals", "other", "TB", "giọng→vocals", "lọt vào giọng", "kick→drums"
         );
         let mut by_source = String::new();
         for (n, (label, params)) in cases.iter().enumerate() {
-            let out = run(cfg, *params, &left, &right);
+            let out = run(cfg, *params, left, right);
             if n == 0 {
                 for s in srcs {
                     by_source += &format!("  {} {:.1}%", s.name, share(&out, s.expected, s, lat) * 100.0);
@@ -224,5 +236,55 @@ fn main() {
     println!("\n== SDR trung bình của cả hai mix ==");
     for ((label, _), t) in cases.iter().zip(&totals) {
         println!("{label:<12}{:>8.2}", t / mixes.len() as f32);
+    }
+
+    // Karaoke: lớp giọng bị tắt. Cần lấy được nhiều giọng nhất khỏi phần đang phát mà mất ít nhạc đệm nhất.
+    let mask = StemParams { center_width: 2.0, ..d };
+    let mut karaoke = vec![("mask γ2".to_string(), mask)];
+    for l in [0.03, 0.1, 0.3] {
+        karaoke.push((format!("MVDR λ{l}"), StemParams { karaoke: true, center_loading: l, ..mask }));
+    }
+    println!("\n== karaoke (γ = 2): % năng lượng từng nguồn nằm trong lớp giọng (bị tắt) ==");
+    for (m, (srcs, (left, right))) in mixes.iter().zip(&inputs).enumerate() {
+        print!("{:<18}", format!("mix {}", mix_name(m)));
+        for s in srcs {
+            print!("{:>16}", s.name);
+        }
+        println!("{:>20}", "nhạc đệm mất (TB)");
+        for (label, params) in &karaoke {
+            let out = run(cfg, *params, left, right);
+            print!("{label:<18}");
+            let mut lost = 0.0;
+            for s in srcs {
+                let v = share(&out, VOCALS, s, lat) * 100.0;
+                if s.expected != VOCALS {
+                    lost += v / (srcs.len() - 1) as f32;
+                }
+                print!("{v:>15.1}%");
+            }
+            println!("{lost:>19.1}%");
+        }
+    }
+
+    println!("\n== cấu hình STFT (presets.js), tham số mặc định — SDR (dB), TB hai mix ==");
+    println!("{:<34}{:>9}{:>8}{:>8}{:>8}{:>8}{:>8}{:>14}", "cấu hình", "trễ (ms)", "drums", "bass", "vocals", "other", "TB", "bass→drums");
+    let old_low = Config { fft_size: 512, hop: 256, time_half: 8, freq_half: 16, margin: 1.0, ..DEFAULT };
+    for (label, c) in [("default", DEFAULT), ("cheaper (= default cũ)", CHEAPER), ("lowLatency", LOW_LATENCY), ("lowLatency cũ", old_low)] {
+        let lat = c.latency();
+        let mut v = [0.0f32; STEMS];
+        for (srcs, (left, right)) in mixes.iter().zip(&inputs) {
+            let out = run(c, d, left, right);
+            for (s, acc) in v.iter_mut().enumerate() {
+                *acc += sdr(&out, s, srcs, lat) / mixes.len() as f32;
+            }
+        }
+        // bass chơi một mình: phần lọt vào lớp trống sẽ không được đổi tông cùng bass
+        let bass = mixes[0].iter().find(|s| s.expected == BASS).unwrap();
+        let leak = share(&run(c, d, &bass.left, &bass.right), DRUMS, bass, lat) * 100.0;
+        let name = format!("{label} {}/{} K{} M{}", c.fft_size, c.hop, c.time_half, c.freq_half);
+        println!(
+            "{name:<34}{:>9.1}{:>8.2}{:>8.2}{:>8.2}{:>8.2}{:>8.2}{leak:>13.1}%",
+            lat as f32 / SR * 1000.0, v[DRUMS], v[BASS], v[VOCALS], v[OTHER], v.iter().sum::<f32>() / STEMS as f32
+        );
     }
 }

@@ -3,7 +3,7 @@
 
 import { createEngine } from '../audio/engine.js';
 import { createSeparatorNode } from '../audio/separator-node.js';
-import { DEFAULT_OPTIONS, KARAOKE_CENTER_WIDTH, STEM_NAMES, effectiveCenterWidth, mergeOptions, separatorPreset } from '../presets.js';
+import { DEFAULT_OPTIONS, KARAOKE_CENTER_WIDTH, STEM_NAMES, effectiveCenterWidth, mergeOptions, separatorParams, separatorPreset } from '../presets.js';
 
 const SR = 48000;
 const DRUMS = 0, BASS = 1, VOCALS = 2, OTHER = 3;
@@ -17,6 +17,8 @@ function lcg(seed) {
   };
 }
 const sine = (len, f, a) => Float32Array.from({ length: len }, (_, i) => a * Math.sin((2 * Math.PI * f * i) / SR));
+/** Tổng `count` bồi âm của `f0`, biên độ a/h. */
+const harmonics = (len, f0, count, a) => mix(...Array.from({ length: count }, (_, h) => sine(len, f0 * (h + 1), a / (h + 1))));
 function clicks(len, period, a = 1) {
   const x = new Float32Array(len);
   for (let i = period; i < len; i += period) x[i] = a;
@@ -124,10 +126,10 @@ async function renderEngine(signal, { semitones = 0, options = {}, record = fals
 }
 
 /** Render một hoặc tất cả output của bộ tách. which: số output hoặc 'sum'. */
-async function renderSeparator(signal, which, quality = 'default') {
+async function renderSeparator(signal, which, quality = 'default', params = {}) {
   const ctx = new OfflineAudioContext(2, lengthOf(signal), SR);
   const src = sourceOf(ctx, signal);
-  const node = await createSeparatorNode(ctx, separatorPreset(quality, SR));
+  const node = await createSeparatorNode(ctx, separatorPreset(quality, SR), params);
   src.connect(node);
   for (let i = 0; i < 4; i++) if (which === 'sum' || which === i) node.connect(ctx.destination, i);
   src.start(0);
@@ -148,7 +150,7 @@ async function testSeparatorCore() {
   const len = SR * 3;
   const center = mix(sine(len, 440, 0.3), clicks(len, SR / 4));
   const x = stereo(mix(center, noise(len, 0.05, 9)), mix(center, noise(len, 0.05, 10)));
-  for (const quality of ['default', 'lowLatency']) {
+  for (const quality of ['default', 'cheaper', 'lowLatency']) {
     const preset = separatorPreset(quality, SR);
     const expected = preset.fftSize + preset.timeHalf * preset.hop;
     const { y, yr, latency } = await renderSeparator(x, 'sum', quality);
@@ -353,8 +355,8 @@ async function testStemControls() {
   record('stemControls', { test: 'nhạc cụ khác 50%: 660 Hz giảm ≈ 6 dB', value: +halfDb.toFixed(2), pass: Math.abs(halfDb - 6.02) < 1 });
 
   // Giọng có độ rộng stereo: R nhỏ hơn L 6 dB ⇒ ψ = 0.8. Lớp giọng nhận ψ^γ, phần còn lại ở "nhạc cụ khác".
-  // Tắt giọng ⇒ engine dùng γ = min(thanh trượt, KARAOKE_CENTER_WIDTH) để giọng sót lại ít hơn;
-  // solo giọng ⇒ vẫn dùng γ của thanh trượt (lớp giọng sạch).
+  // Tắt giọng ⇒ engine dùng γ = min(thanh trượt, KARAOKE_CENTER_WIDTH) để giọng sót lại ít hơn (chế độ karaoke của
+  // bộ tách chia một nguồn đơn lẻ đúng như mask: ψ^γ); solo giọng ⇒ vẫn dùng γ của thanh trượt (lớp giọng sạch).
   const wide = { l: vocal, r: vocal.map((v) => 0.5 * v) };
   const wideBase = await renderEngine(wide, { options: SEP() });
   const wideMuted = await renderEngine(wide, { options: SEP({ stems: { vocals: { mute: true } } }) });
@@ -379,6 +381,34 @@ async function testStemControls() {
     pass: cw({}) === DEFAULT_OPTIONS.centerWidth && cw({ stems: { vocals: { mute: true } } }) === KARAOKE_CENTER_WIDTH
       && cw({ stems: { other: { solo: true } } }) === KARAOKE_CENTER_WIDTH && cw({ stems: { vocals: { gain: 0 } } }) === KARAOKE_CENTER_WIDTH
       && cw({ centerWidth: 1, stems: { vocals: { mute: true } } }) === 1,
+  });
+  const kar = (patch) => separatorParams(mergeOptions(undefined, patch)).karaoke;
+  record('stemControls', {
+    test: 'chế độ karaoke của bộ tách: bình thường / mute giọng / solo lớp khác / solo giọng',
+    value: [kar({}), kar({ stems: { vocals: { mute: true } } }), kar({ stems: { other: { solo: true } } }), kar({ stems: { vocals: { solo: true } } })].join(' / '),
+    pass: kar({}) === false && kar({ stems: { vocals: { mute: true } } }) === true && kar({ stems: { other: { solo: true } } }) === true
+      && kar({ stems: { vocals: { solo: true } } }) === false,
+  });
+
+  // Karaoke: giọng (giữa) nằm dưới một hợp âm stereo rộng (L/R lệch tần số ⇒ không tương quan). Bộ lọc không gian
+  // phải lấy được nhiều giọng hơn mask với cùng γ, mà không lấy thêm hợp âm.
+  const len4 = SR * 4;
+  const voice = harmonics(len4, 220, 8, 0.2);
+  const chord = (detune) => mix(...[220, 277.18, 329.63].map((f) => harmonics(len4, f * detune, 8, 0.1)));
+  const chordL = chord(1.004);
+  const under = stereo(mix(voice, chordL), mix(voice, chord(0.996)));
+  const asMask = await renderSeparator(under, VOCALS, 'default', { centerWidth: KARAOKE_CENTER_WIDTH, karaoke: false });
+  const asKaraoke = await renderSeparator(under, VOCALS, 'default', { centerWidth: KARAOKE_CENTER_WIDTH, karaoke: true });
+  const lat = asMask.latency;
+  const voiceMask = share(asMask.y, voice, lat), voiceKaraoke = share(asKaraoke.y, voice, lat);
+  const chordMask = share(asMask.y, chordL, lat), chordKaraoke = share(asKaraoke.y, chordL, lat);
+  record('stemControls', {
+    test: 'karaoke: giọng dưới hợp âm rộng — phần giọng lấy ra được (mask → karaoke)',
+    value: `${voiceMask.toFixed(3)} → ${voiceKaraoke.toFixed(3)}`, pass: voiceKaraoke > voiceMask + 0.1,
+  });
+  record('stemControls', {
+    test: 'karaoke: giọng dưới hợp âm rộng — phần hợp âm bị lấy theo (mask → karaoke)',
+    value: `${chordMask.toFixed(3)} → ${chordKaraoke.toFixed(3)}`, pass: chordKaraoke < chordMask + 0.02,
   });
 
   // Đổi tông riêng: giọng +5, nhạc cụ khác giữ nguyên.

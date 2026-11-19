@@ -15,6 +15,15 @@
 //! Cửa sổ làm mượt là hàm mũ HAI PHÍA quanh frame đang xử lý — dùng luôn K frame "tương lai" đã phải chờ
 //! cho median theo thời gian, nên ψ không bị trễ so với tín hiệu và không tốn thêm latency.
 //!
+//! Chế độ karaoke (lớp giọng không được phát ra → ưu tiên lấy hết giọng khỏi các lớp còn lại): mask ψ^γ loại cả bin
+//! khi giọng nằm chung bin với nhạc cụ lệch/rộng, nên giọng sót lại trong "other". Vì vậy trước khi áp mask, phần
+//! giữa được trích ra bằng bộ lọc không gian MVDR hướng vào giữa (dùng cùng các phổ làm mượt S_LL, S_RR, S_LR):
+//!   C = w_L·L + w_R·R,  w_L + w_R = 1 (phần ở giữa đi qua nguyên vẹn), w chọn để công suất đầu ra nhỏ nhất:
+//!   w_L = (S_RR − S_LR + δ) / (S_LL + S_RR − 2·S_LR + 2δ),  δ = λ·(S_LL + S_RR)   (diagonal loading)
+//!   vocals = h · band(f) · [ g·C + ψ'^γ · (X − g·C) ],  g = P_C / P_out (hậu lọc Wiener, xem `center_split`)
+//! Một nhạc cụ lệch trái/phải nằm chung bin với giọng bị triệt tiêu thay vì kéo cả bin sang "other". ψ' là độ giống
+//! nhau L/R của phần CÒN LẠI sau khi bỏ g·C: một nguồn đơn lẻ (không có gì để triệt) vẫn được chia bằng ψ^γ như thường.
+//!
 //! Tối ưu:
 //! - mọi mask dùng chung cho 2 kênh → median chỉ tính 1 lần, giữ ảnh stereo;
 //! - chỉ IFFT 3 lớp; lớp "other" = input trễ − 3 lớp kia ⇒ tổng 4 lớp == input trễ (tái tạo hoàn hảo);
@@ -88,6 +97,10 @@ pub struct StemParams {
     pub center_smoothing_ms: f32,
     /// κ: ở dải thấp, công suất phải vượt median theo thời gian bao nhiêu lần (biên độ) thì tính là trống.
     pub transient_margin: f32,
+    /// Lớp giọng không được phát ra: trích phần giữa bằng MVDR trước khi áp mask ψ^γ (xem đầu file).
+    pub karaoke: bool,
+    /// λ: diagonal loading của MVDR. Lớn hơn → ít triệt nhạc cụ lệch hơn nhưng giọng hơi lệch khỏi giữa vẫn được lấy.
+    pub center_loading: f32,
 }
 
 impl Default for StemParams {
@@ -98,6 +111,8 @@ impl Default for StemParams {
             center_width: 4.0,
             center_smoothing_ms: 50.0,
             transient_margin: 2.0,
+            karaoke: false,
+            center_loading: 0.1,
         }
     }
 }
@@ -141,6 +156,11 @@ pub struct Separator {
     smooth_w: Vec<f32>,
     psi_num: Vec<f32>,
     psi_den: Vec<f32>,
+    /// |L|² làm mượt như `psi_num`/`psi_den` (S_RR = psi_den − s_ll) — chỉ dùng ở chế độ karaoke.
+    s_ll: Vec<f32>,
+    /// MVDR cho từng bin: w_L (w_R = 1 − w_L) và gain của đầu ra MVDR trong lớp giọng — chỉ dùng ở chế độ karaoke.
+    beam_l: Vec<f32>,
+    beam_gain: Vec<f32>,
     /// J: công suất dải thấp được lấy trung bình trên 2J+1 frame (≈ 30 ms) trước khi so với median.
     trans_half: usize,
     band_low: Vec<f32>,
@@ -222,6 +242,9 @@ impl Separator {
             smooth_w: zeros(cfg.time_half + 1),
             psi_num: zeros(bins),
             psi_den: zeros(bins),
+            s_ll: zeros(bins),
+            beam_l: zeros(bins),
+            beam_gain: zeros(bins),
             trans_half: ((0.015 * cfg.sample_rate / hop as f32).round() as usize).clamp(1, cfg.time_half),
             band_low: zeros(bins),
             band_vocal: zeros(bins),
@@ -254,6 +277,8 @@ impl Separator {
             center_width: fix(p.center_width, 0.5, 64.0, d.center_width),
             center_smoothing_ms: fix(p.center_smoothing_ms, 0.0, 1000.0, d.center_smoothing_ms),
             transient_margin: fix(p.transient_margin, 1.0, 16.0, d.transient_margin),
+            karaoke: p.karaoke,
+            center_loading: fix(p.center_loading, 0.01, 1.0, d.center_loading),
         };
         self.params = p;
         let frame_ms = self.cfg.hop as f32 / self.cfg.sample_rate * 1000.0;
@@ -398,8 +423,10 @@ impl Separator {
             None => psi.powf(gamma),
         };
         // Phổ chéo làm mượt hai phía quanh frame trung tâm: ψ = 2·Σw·Re(L·R*) / Σw·(|L|² + |R|²).
+        let karaoke = self.params.karaoke;
         self.psi_num.fill(0.0);
         self.psi_den.fill(0.0);
+        self.s_ll.fill(0.0);
         for j in 0..slots {
             let w = self.smooth_w[j.abs_diff(time_half)];
             if w == 0.0 {
@@ -412,7 +439,14 @@ impl Separator {
                 *num += w * x;
                 *den += w * p;
             }
+            if karaoke {
+                let left = &self.spec[s * CHANNELS * bins..s * CHANNELS * bins + bins];
+                for (acc, x) in self.s_ll.iter_mut().zip(left) {
+                    *acc += w * x.norm_sqr();
+                }
+            }
         }
+        let loading = self.params.center_loading;
         let kappa = 1.0 / (self.params.transient_margin * self.params.transient_margin);
         let th = self.trans_half;
         let trans_norm = kappa / (2 * th + 1) as f32;
@@ -440,9 +474,22 @@ impl Separator {
             let psi = if den > 1e-30 { (2.0 * self.psi_num[k] / den).clamp(0.0, 1.0) } else { 0.0 };
 
             let vband = self.band_vocal[k];
+            let mut vocal = center_pow(psi);
+            if karaoke {
+                let (mut w_left, mut beam) = (0.5, 0.0);
+                if den > 1e-30 {
+                    let sll = self.s_ll[k];
+                    let (w, g, psi_rest) = center_split(sll, (den - sll).max(0.0), self.psi_num[k], loading);
+                    // lớp giọng = g·C + ψ'^γ·(X − g·C) = ψ'^γ·X + (1 − ψ'^γ)·g·C
+                    vocal = center_pow(psi_rest);
+                    (w_left, beam) = (w, (1.0 - vocal) * g);
+                }
+                self.beam_l[k] = w_left;
+                self.beam_gain[k] = harmonic * vband * beam;
+            }
             self.gains[DRUMS][k] = drums;
             self.gains[BASS][k] = harmonic * low;
-            self.gains[VOCALS][k] = harmonic * vband * center_pow(psi);
+            self.gains[VOCALS][k] = harmonic * vband * vocal;
 
             let e = x * harmonic * vband;
             centered += e * psi;
@@ -465,6 +512,14 @@ impl Separator {
             for s in 0..SYNTH_STEMS {
                 for ((y, x), &g) in self.spec_tmp.iter_mut().zip(&self.spec[off..off + bins]).zip(&self.gains[s]) {
                     *y = x * g;
+                }
+                if karaoke && s == VOCALS {
+                    // + phần giữa do MVDR trích ra (giống nhau ở hai kênh)
+                    let (l, r) = self.spec[center * CHANNELS * bins..(center * CHANNELS + 2) * bins].split_at(bins);
+                    let beam = self.beam_l.iter().zip(&self.beam_gain);
+                    for (((y, l), r), (&wl, &g)) in self.spec_tmp.iter_mut().zip(l).zip(r).zip(beam) {
+                        *y += (l * wl + r * (1.0 - wl)) * g;
+                    }
                 }
                 self.spec_tmp[0].im = 0.0;
                 self.spec_tmp[bins - 1].im = 0.0;
@@ -491,6 +546,32 @@ impl Separator {
             }
         }
     }
+}
+
+/// Tách phần ở giữa stereo của một bin bằng MVDR + hậu lọc Wiener (chế độ karaoke).
+/// `sll`, `srr`, `slr`: S_LL, S_RR, Re(S_LR) đã làm mượt, sll + srr > 0.
+/// Trả về (w_L, g, ψ'): phần giữa ≈ g · (w_L·L + (1 − w_L)·R); ψ' = độ giống nhau L/R của phần còn lại.
+#[inline]
+fn center_split(sll: f32, srr: f32, slr: f32, loading: f32) -> (f32, f32, f32) {
+    let total = sll + srr;
+    // u, v: công suất "không nằm giữa" của kênh trái / phải; u + v = công suất của L − R (≥ 0).
+    let (u, v) = (sll - slr, srr - slr);
+    let delta = loading * total;
+    let wl = (v + delta) / (u + v + 2.0 * delta);
+    let wr = 1.0 - wl;
+    let p_out = wl * wl * sll + wr * wr * srr + 2.0 * wl * wr * slr;
+    // Công suất phần giữa = giá trị nhỏ hơn trong hai ước lượng:
+    //   det / (u + v): phần còn lại sau khi triệt hoàn toàn MỘT nguồn lệch — đúng khi nhiễu là một nhạc cụ pan lệch;
+    //   S_LR:          đúng khi nhiễu ở hai kênh không tương quan (pad, reverb rộng).
+    // Một nguồn đơn lẻ lệch khỏi giữa (ma trận hạng 1) cho det = 0 ⇒ không có "phần giữa", để cửa sổ ψ'^γ quyết định.
+    let uv = u + v;
+    let nulled = if uv > 1e-6 * total { ((sll * srr - slr * slr) / uv).max(0.0) } else { p_out };
+    let center = nulled.min(slr).clamp(0.0, p_out.max(0.0));
+    let g = if p_out > 1e-30 { center / p_out } else { 0.0 };
+    // Phần còn lại: bỏ công suất phần giữa khỏi cả S_LL, S_RR và S_LR.
+    let rest = total - 2.0 * center;
+    let psi_rest = if rest > 1e-6 * total { (2.0 * (slr - center) / rest).clamp(0.0, 1.0) } else { 0.0 };
+    (wl, g, psi_rest)
 }
 
 // ---------------------------------------------------------------------------
@@ -581,9 +662,17 @@ pub unsafe extern "C" fn sep_set_params(
     vocal_high_hz: f32,
     center_width: f32,
     center_smoothing_ms: f32,
+    karaoke: u32,
 ) {
     if let Some(s) = unsafe { s.as_mut() } {
-        s.set_params(StemParams { bass_cutoff_hz, vocal_high_hz, center_width, center_smoothing_ms, ..StemParams::default() });
+        s.set_params(StemParams {
+            bass_cutoff_hz,
+            vocal_high_hz,
+            center_width,
+            center_smoothing_ms,
+            karaoke: karaoke != 0,
+            ..StemParams::default()
+        });
     }
 }
 
@@ -610,19 +699,27 @@ mod tests {
     use super::*;
 
     const SR: f32 = 48000.0;
+    /// = SEPARATOR_PRESETS.default trong presets.js
     const CFG: Config = Config {
         sample_rate: SR,
-        fft_size: 1024,
+        fft_size: 2048,
         hop: 512,
-        time_half: 6,
-        freq_half: 32,
-        margin: 1.0,
+        time_half: 4,
+        freq_half: 24,
+        margin: 0.92,
         sharpness: 3.0,
     };
+    const KARAOKE: StemParams =
+        StemParams { bass_cutoff_hz: 180.0, vocal_high_hz: 12000.0, center_width: 2.0, center_smoothing_ms: 50.0, transient_margin: 2.0, karaoke: true, center_loading: 0.1 };
 
     /// Chạy tín hiệu stereo qua Separator theo block 128 mẫu; trả về [stem][kênh][mẫu].
     fn run(cfg: Config, left: &[f32], right: &[f32]) -> Vec<Vec<Vec<f32>>> {
+        run_with(cfg, StemParams::default(), left, right)
+    }
+
+    fn run_with(cfg: Config, params: StemParams, left: &[f32], right: &[f32]) -> Vec<Vec<Vec<f32>>> {
         let mut s = Separator::new(cfg).unwrap();
+        s.set_params(params);
         let mut out = vec![vec![Vec::new(); CHANNELS]; STEMS];
         for (bl, br) in left.chunks(128).zip(right.chunks(128)) {
             let len = bl.len();
@@ -834,6 +931,79 @@ mod tests {
         let energy = |y: &[f32]| y[48000..].iter().map(|v| v * v).sum::<f32>();
         let rest = energy(&out[OTHER][0]) / energy(&x);
         assert!(rest < 1e-3, "năng lượng OTHER / input = {rest}");
+    }
+
+    #[test]
+    fn karaoke_keeps_sum_and_routing() {
+        // Tổng 4 lớp vẫn bằng input.
+        let len = 96000;
+        let lat = CFG.latency();
+        let center = tone(len, 600.0, 0.3);
+        let left = add(&noise(len, 7), &center);
+        let right = add(&noise(len, 8), &center);
+        let out = run_with(CFG, KARAOKE, &left, &right);
+        for (c, x) in [&left, &right].into_iter().enumerate() {
+            let max_err = (lat..len)
+                .map(|i| ((0..STEMS).map(|s| out[s][c][i]).sum::<f32>() - x[i - lat]).abs())
+                .fold(0.0f32, f32::max);
+            assert!(max_err < 1e-5, "channel {c}: max_err={max_err}");
+        }
+
+        // Tone ở giữa → trọn trong lớp giọng; tone chỉ bên trái → không vào lớp giọng.
+        let len = 48000 * 2;
+        let vocal = tone(len, 440.0, 0.3);
+        let guitar = tone(len, 660.0, 0.3);
+        let out = run_with(CFG, KARAOKE, &add(&vocal, &guitar), &vocal);
+        let v = share(&out[VOCALS], &vocal, lat, 1);
+        assert!((0.97..1.01).contains(&v), "tone giữa → vocals: {v}");
+        let g_vocal = share(&out[VOCALS], &guitar, lat, 0);
+        let g_other = share(&out[OTHER], &guitar, lat, 0);
+        assert!(g_vocal < 0.05, "tone trái lọt vào vocals: {g_vocal}");
+        assert!(g_other > 0.9, "tone trái → other: {g_other}");
+
+        // Nguồn đơn lẻ hơi lệch khỏi giữa (R nhỏ hơn L 6 dB, ψ = 0.8): không có gì để triệt ⇒ chia bằng ψ^γ như mask.
+        let wide_r: Vec<f32> = vocal.iter().map(|x| 0.5 * x).collect();
+        let out = run_with(CFG, KARAOKE, &vocal, &wide_r);
+        let w = share(&out[VOCALS], &vocal, lat, 0);
+        assert!((w - 0.8f32.powf(KARAOKE.center_width)).abs() < 0.03, "nguồn lệch (ψ = 0.8) → vocals: {w}");
+    }
+
+    /// Tổng `harmonics` bồi âm của `f0`, biên độ 1/h.
+    fn harmonic(len: usize, f0: f32, harmonics: usize, a: f32) -> Vec<f32> {
+        (1..=harmonics).fold(vec![0.0; len], |acc, h| add(&acc, &tone(len, f0 * h as f32, a / h as f32)))
+    }
+
+    #[test]
+    fn karaoke_pulls_vocal_from_under_other_instruments() {
+        let len = 48000 * 4;
+        let lat = CFG.latency();
+        let mask = StemParams { karaoke: false, ..KARAOKE };
+        let vocal = harmonic(len, 220.0, 8, 0.2);
+
+        // 1) Hợp âm stereo rộng (L/R lệch tần số → không tương quan) phủ lên các bồi âm của giọng.
+        let (mut wide_l, mut wide_r) = (vec![0.0; len], vec![0.0; len]);
+        for f0 in [220.0f32, 277.18, 329.63] {
+            wide_l = add(&wide_l, &harmonic(len, f0 * 1.004, 8, 0.1));
+            wide_r = add(&wide_r, &harmonic(len, f0 * 0.996, 8, 0.1));
+        }
+        let (left, right) = (add(&vocal, &wide_l), add(&vocal, &wide_r));
+        let m = run_with(CFG, mask, &left, &right);
+        let k = run_with(CFG, KARAOKE, &left, &right);
+        let (v_mask, v_kar) = (share(&m[VOCALS], &vocal, lat, 0), share(&k[VOCALS], &vocal, lat, 0));
+        let (w_mask, w_kar) = (share(&m[VOCALS], &wide_l, lat, 0), share(&k[VOCALS], &wide_l, lat, 0));
+        assert!(v_kar > v_mask + 0.1, "hợp âm rộng — giọng lấy ra được: karaoke {v_kar}, mask {v_mask}");
+        assert!(w_kar < w_mask + 0.02, "hợp âm rộng — nhạc đệm bị mất: karaoke {w_kar}, mask {w_mask}");
+
+        // 2) Nhạc cụ pan lệch trái (0.9 / 0.3) có bồi âm nằm chung bin với bồi âm của giọng.
+        let guitar = harmonic(len, 226.0, 8, 0.2);
+        let left = add(&vocal, &guitar.iter().map(|x| x * 0.9).collect::<Vec<_>>());
+        let right = add(&vocal, &guitar.iter().map(|x| x * 0.3).collect::<Vec<_>>());
+        let m = run_with(CFG, mask, &left, &right);
+        let k = run_with(CFG, KARAOKE, &left, &right);
+        let (v_mask, v_kar) = (share(&m[VOCALS], &vocal, lat, 1), share(&k[VOCALS], &vocal, lat, 1));
+        let (g_mask, g_kar) = (share(&m[VOCALS], &guitar, lat, 0), share(&k[VOCALS], &guitar, lat, 0));
+        assert!(v_kar > v_mask, "nhạc cụ lệch — giọng lấy ra được: karaoke {v_kar}, mask {v_mask}");
+        assert!(g_kar < 0.9 * g_mask, "nhạc cụ lệch — nhạc đệm bị mất: karaoke {g_kar}, mask {g_mask}");
     }
 
     #[test]
