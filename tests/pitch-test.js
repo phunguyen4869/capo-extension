@@ -471,6 +471,9 @@ async function testSwitching() {
     // Đổi chất lượng làm độ trễ nhảy (120 → 140 ms): hai nhánh lệch nhau nên crossfade không khớp hoàn toàn —
     // chỉ yêu cầu không có khoảng lặng (trước đây mất tiếng ~120 ms).
     ['+3: đổi chất lượng (độ trễ đổi)', 3, {}, (e) => e.setOptions({ quality: 'cheaper' }), { hf: Infinity, min: -10 }],
+    // Tách lớp: thay cả bộ tách lớp (preset khác) — trước đây bộ cũ bị ngắt ngay, bộ mới chưa có đầu ra.
+    ['tách lớp, +3: đổi chất lượng (độ trễ đổi)', 3, SEP(), (e) => e.setOptions({ quality: 'cheaper' }), { hf: Infinity, min: -10 }],
+    ['tách lớp, 0: đổi chất lượng → lowLatency (độ trễ đổi)', 0, SEP(), (e) => e.setOptions({ quality: 'lowLatency' }), { hf: Infinity, min: -10 }],
   ];
   for (const [label, semitones, options, change, limit = { hf: 6, min: -4 }] of cases) {
     const { y, latency } = await renderWithChange(x, { semitones, options, T, change });
@@ -519,7 +522,7 @@ async function testInstanceReuse() {
   const ctx = new OfflineAudioContext(2, SR, SR);
   const engine = await createEngine(ctx, new GainNode(ctx), ctx.destination, { semitones: 3, options: SEP() });
   const wait = () => new Promise((r) => setTimeout(r, 700)); // > LINGER_S: cleanup đã trả node về pool
-  const counts = [];
+  const counts = [], seps = [];
   for (let i = 0; i < 4; i++) {
     await engine.setOptions({ quality: 'cheaper', formant: true });
     await engine.startRecording();
@@ -528,11 +531,16 @@ async function testInstanceReuse() {
     await engine.setOptions({ separate: true });
     await wait();
     counts.push(engine.debug().stretchInstances);
+    seps.push(engine.debug().separatorInstances);
   }
   engine.dispose();
   record('instanceReuse', {
     test: 'số Stretch đã tạo sau mỗi vòng (đổi chất lượng/formant, ghi từng lớp, tắt/bật tách lớp)', value: counts.join(' / '),
     pass: counts.every((c) => c === counts[0]) && counts[0] <= 8,
+  });
+  record('instanceReuse', {
+    test: '… số bộ tách lớp đã tạo (tối đa 1 cho mỗi preset)', value: seps.join(' / '),
+    pass: seps.every((c) => c === seps[0]) && seps[0] <= 2,
   });
 }
 

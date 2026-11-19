@@ -26,6 +26,8 @@ class CapoSeparatorProcessor extends AudioWorkletProcessor {
       this.port.onmessage = (e) => {
         const m = e.data;
         if (m === 'reset') this.ex.sep_reset(this.ptr);
+        else if (m === 'pause') this.paused = true; // node rảnh trong pool của engine: không xử lý, output 0
+        else if (m === 'resume') this.paused = false;
         else if (m === 'free') this.free();
         else if (m?.type === 'params') this.setParams(m);
       };
@@ -70,6 +72,7 @@ class CapoSeparatorProcessor extends AudioWorkletProcessor {
 
   process(inputs, outputs) {
     if (!this.alive) return false;
+    if (this.paused) return true;
     // Rust không cấp phát trong process, nhưng vẫn phòng khi memory bị grow (view cũ bị detach).
     if (this.ex.memory.buffer !== this.memory) this.bindViews();
 

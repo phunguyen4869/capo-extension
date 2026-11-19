@@ -187,7 +187,11 @@ export async function createEngine(ctx, input, destination, { semitones = 0, opt
     tap: new GainNode(ctx), // điểm ghi file của lớp
   }));
 
-  let sep = null;
+  // Bộ tách lớp theo preset (mỗi chất lượng một preset). Đổi preset = crossfade ở cổng đầu vào sang bộ khác; bộ
+  // không dùng nữa được tạm dừng (worklet không xử lý) và giữ lại để dùng sau, vì như Stretch, bộ nhớ WASM của nó
+  // chỉ được trả khi AudioContext đóng.
+  const seps = new Map(); // JSON(preset) → node (+ .paused)
+  let sep = null; // bộ đang dùng
   let sepKey = null;
   let separated = false;
   let perStem = false;
@@ -196,15 +200,26 @@ export async function createEngine(ctx, input, destination, { semitones = 0, opt
   async function ensureSeparator() {
     const preset = separatorPreset(opts.quality, SR);
     const key = JSON.stringify(preset);
-    if (sep && sepKey === key) return false;
-    const old = sep;
-    sep = await createSeparatorNode(ctx, preset, separatorParams(opts));
-    sepKey = key;
-    if (old) {
-      old.disconnect();
-      old.port.postMessage('free');
+    let node = seps.get(key);
+    if (!node) {
+      node = await createSeparatorNode(ctx, preset, separatorParams(opts));
+      node.paused = false;
+      seps.set(key, node);
+    } else if (node.paused) {
+      node.port.postMessage('reset'); // bỏ âm thanh cũ còn trong bộ đệm
+      node.port.postMessage('resume');
+      node.paused = false;
+      node.setParams(separatorParams(opts));
+    } else if (node !== sep) {
+      node.setParams(separatorParams(opts)); // đang fade ra, được dùng lại: giữ liên tục, không reset
     }
-    return true;
+    sep = node;
+    sepKey = key;
+  }
+  function pauseSeparator(node) {
+    node.disconnect();
+    node.port.postMessage('pause');
+    node.paused = true;
   }
 
   function applyVolumes(immediate = false) {
@@ -276,12 +291,7 @@ export async function createEngine(ctx, input, destination, { semitones = 0, opt
       g.disconnect();
       gates.delete(k);
     }
-    if (sep && !inUse.has(sep)) {
-      sep.disconnect();
-      sep.port.postMessage('free');
-      sep = null;
-      sepKey = null;
-    }
+    for (const node of seps.values()) if (!node.paused && !inUse.has(node)) pauseSeparator(node);
   }
   function scheduleCleanup() {
     if (cleanupTimer || disposed) return;
@@ -306,7 +316,7 @@ export async function createEngine(ctx, input, destination, { semitones = 0, opt
     const per = want && perStem;
     const transposed = (name) => opts.stems[name].transpose && !bypass;
     const profileOf = (name) => stretchProfile(opts, want ? name : null);
-    if (want && (await ensureSeparator())) sep.port.postMessage('reset');
+    if (want) await ensureSeparator();
 
     // Độ trễ chung: theo profile chậm nhất của chế độ hiện tại — không phụ thuộc lớp nào đang đổi tông, để bật/tắt
     // đổi tông từng lớp hoặc về 0 bán cung không làm lệch nhịp.
@@ -341,7 +351,10 @@ export async function createEngine(ctx, input, destination, { semitones = 0, opt
       feeds.add(b);
     };
     if (want) {
-      feed(input, sep);
+      const g = gateOf(input, 0, { key: `sep|${sepKey}` });
+      open.add(g);
+      edge(input, g);
+      edge(g, sep);
       stems.forEach((s, i) => {
         if (per) {
           edge(s.tap, s.pvol);
@@ -434,7 +447,8 @@ export async function createEngine(ctx, input, destination, { semitones = 0, opt
       activeStretches: activeStretches().length,
       separated,
       perStem: separated && perStem,
-      separatorAlive: !!sep,
+      separatorAlive: !!sep && !sep.paused,
+      separatorInstances: seps.size, // kể cả bộ đang tạm dừng
     }),
 
     /** Ghi mix + (nếu đang tách lớp) từng lớp ra WAV. */
@@ -471,9 +485,9 @@ export async function createEngine(ctx, input, destination, { semitones = 0, opt
       recorder?.abort();
       recorder = null;
       input.disconnect();
-      if (sep) {
-        sep.disconnect();
-        sep.port.postMessage('free');
+      for (const node of seps.values()) {
+        node.disconnect();
+        node.port.postMessage('free');
       }
       for (const p of [...procs.values()]) dropProc(p);
       for (const g of gates.values()) g.disconnect();
