@@ -3,7 +3,7 @@
 
 import { createEngine } from '../audio/engine.js';
 import { createSeparatorNode } from '../audio/separator-node.js';
-import { DEFAULT_OPTIONS, KARAOKE_CENTER_WIDTH, STEM_NAMES, effectiveCenterWidth, mergeOptions, separatorParams, separatorPreset } from '../presets.js';
+import { DEFAULT_OPTIONS, KARAOKE_CENTER_WIDTH, STEM_NAMES, effectiveCenterWidth, mergeOptions, separatorParams, separatorPreset, stretchProfile } from '../presets.js';
 
 const SR = 48000;
 const DRUMS = 0, BASS = 1, VOCALS = 2, OTHER = 3;
@@ -122,7 +122,8 @@ async function renderEngine(signal, { semitones = 0, options = {}, record = fals
   const out = await ctx.startRendering();
   const ms = performance.now() - t0;
   const files = record ? await engine.stopRecording() : null;
-  return { y: out.getChannelData(0), yr: out.getChannelData(1), latency, ms, files, engine };
+  engine.dispose();
+  return { y: out.getChannelData(0), yr: out.getChannelData(1), latency, ms, files };
 }
 
 /** Render một hoặc tất cả output của bộ tách. which: số output hoặc 'sum'. */
@@ -232,8 +233,11 @@ async function testBypassAndSharing() {
   const cases = [
     ['không tách lớp, 0 bán cung', 0, {}, 0],
     ['không tách lớp, +3', 3, {}, 1],
-    ['tách lớp (3 lớp đổi tông), +3', 3, SEP(), 1],
-    ['tách lớp (4 lớp đổi tông), +3', 3, SEP({ stems: { drums: { transpose: true } } }), 1],
+    // Lớp cùng profile dùng chung Stretch: bass (khối dài) + nhóm chuẩn; formant bật ⇒ thêm nhóm giọng.
+    ['tách lớp (3 lớp đổi tông), +3', 3, SEP(), 2],
+    ['tách lớp (4 lớp đổi tông), +3', 3, SEP({ stems: { drums: { transpose: true } } }), 2],
+    ['tách lớp, formant, +3', 3, SEP({ formant: true }), 3],
+    ['tách lớp, cheaper (bass dùng chung), +3', 3, SEP({ quality: 'cheaper' }), 1],
     ['tách lớp, 0 bán cung', 0, SEP(), 0],
   ];
   for (const [label, semitones, options, expected] of cases) {
@@ -247,7 +251,7 @@ async function testBypassAndSharing() {
       record('bypassAndSharing', { test: '… khi đang ghi từng lớp (Stretch riêng)', value: rec, expected: 3, pass: rec === 3 });
       await engine.stopRecording();
       const after = engine.debug().activeStretches;
-      record('bypassAndSharing', { test: '… sau khi dừng ghi (về Stretch chung)', value: after, expected: 1, pass: after === 1 });
+      record('bypassAndSharing', { test: '… sau khi dừng ghi (về Stretch chung)', value: after, expected: 2, pass: after === 2 });
     }
     engine.dispose();
   }
@@ -420,6 +424,164 @@ async function testStemControls() {
   record('stemControls', { test: 'nhạc cụ khác giữ nguyên: 660 Hz so với 881 Hz (dB)', value: +guitarStays.toFixed(1), pass: guitarStays > 15 });
 }
 
+// ---------- chuyển trạng thái giữa lúc đang phát (A1: crossfade) ----------
+/** Năng lượng sai phân bậc 3 (≈ thành phần cao tần, nơi click hiện ra) trên mỗi mẫu. */
+function hfEnergy(y, a, b) {
+  let e = 0;
+  for (let i = a + 3; i < b; i++) { const d = y[i] - 3 * y[i - 1] + 3 * y[i - 2] - y[i - 3]; e += d * d; }
+  return e / (b - a);
+}
+function rmsEnvelope(y, a, b, w = 480) {
+  const r = [];
+  for (let i = a; i + w <= b; i += w) r.push(Math.sqrt(energy(y, i, i + w) / w));
+  return r;
+}
+
+/** Render, tại giây T gọi `change(engine)`; trả về output và độ trễ engine sau thay đổi. */
+async function renderWithChange(signal, { semitones = 0, options = {}, T = 2, change }) {
+  const ctx = new OfflineAudioContext(2, lengthOf(signal), SR);
+  const src = sourceOf(ctx, signal);
+  const input = new GainNode(ctx);
+  src.connect(input);
+  const engine = await createEngine(ctx, input, ctx.destination, { semitones, options });
+  ctx.suspend(T).then(async () => {
+    await change(engine);
+    ctx.resume();
+  });
+  src.start(0);
+  const out = await ctx.startRendering();
+  const latency = Math.round((await engine.latency()) * SR);
+  engine.dispose();
+  return { y: out.getChannelData(0), latency };
+}
+
+async function testSwitching() {
+  const len = SR * 4, T = 2;
+  const x = harmonics(len, 220, 4, 0.3);
+  const cases = [
+    ['0 → +1', 0, {}, (e) => e.setSemitones(1)],
+    ['+1 → 0', 1, {}, (e) => e.setSemitones(0)],
+    ['0 → +0.01', 0, {}, (e) => e.setSemitones(0.01)],
+    ['+3 → 0', 3, {}, (e) => e.setSemitones(0)],
+    ['tách lớp, 0 → +1', 0, SEP(), (e) => e.setSemitones(1)],
+    ['tách lớp, +1 → 0', 1, SEP(), (e) => e.setSemitones(0)],
+    ['tách lớp, +3: tắt đổi tông lớp khác', 3, SEP(), (e) => e.setOptions({ stems: { other: { transpose: false } } })],
+    ['tách lớp, +3: bật formant', 3, SEP(), (e) => e.setOptions({ formant: true })],
+    ['tách lớp, +3: bắt đầu ghi từng lớp', 3, SEP(), (e) => e.startRecording()],
+    // Đổi chất lượng làm độ trễ nhảy (120 → 140 ms): hai nhánh lệch nhau nên crossfade không khớp hoàn toàn —
+    // chỉ yêu cầu không có khoảng lặng (trước đây mất tiếng ~120 ms).
+    ['+3: đổi chất lượng (độ trễ đổi)', 3, {}, (e) => e.setOptions({ quality: 'cheaper' }), { hf: Infinity, min: -10 }],
+  ];
+  for (const [label, semitones, options, change, limit = { hf: 6, min: -4 }] of cases) {
+    const { y, latency } = await renderWithChange(x, { semitones, options, T, change });
+    const t0 = T * SR + latency;
+    const base = hfEnergy(y, SR * 1.2, SR * 1.8);
+    const hfDb = db(hfEnergy(y, t0 - 0.05 * SR, t0 + 0.4 * SR) / base);
+    const ref = rmsEnvelope(y, SR * 1.2, SR * 1.8);
+    const refMean = ref.reduce((a, b) => a + b) / ref.length;
+    const env = rmsEnvelope(y, t0 - 0.2 * SR, t0 + 0.4 * SR);
+    const minDb = 20 * Math.log10(Math.max(1e-9, Math.min(...env)) / refMean);
+    record('switching', {
+      case: label, hfDb: +hfDb.toFixed(1), envMinDb: +minDb.toFixed(1),
+      pass: hfDb < limit.hf && minDb > limit.min,
+    });
+  }
+}
+
+// ---------- profile Stretch theo lớp (A2) ----------
+/** Bassline E1–B1, mỗi nốt 0.5 s, 8 bồi âm. */
+function bassline(notes) {
+  const noteLen = SR / 2;
+  const x = new Float32Array(noteLen * notes.length + SR);
+  notes.forEach((f, n) => {
+    const s = harmonics(noteLen, f, 8, 0.3);
+    for (let i = 0; i < noteLen; i++) x[SR / 2 + n * noteLen + i] = s[i] * Math.min(1, i / 240, (noteLen - i) / 240);
+  });
+  return x;
+}
+/** Tỉ lệ năng lượng nằm đúng các bồi âm đã đổi tông (giữa mỗi nốt). */
+function harmonicPurity(y, notes, k, latency) {
+  const noteLen = SR / 2;
+  let sum = 0;
+  notes.forEach((f, n) => {
+    const a = SR / 2 + n * noteLen + latency + 0.15 * SR;
+    const seg = y.subarray(a, a + 0.25 * SR);
+    const tot = energy(seg, 0, seg.length);
+    let good = 0;
+    for (let h = 1; h <= 8; h++) for (let d = -1; d <= 1; d += 0.5) good += goertzelPower(seg, f * k * h + d);
+    sum += (2 * good) / seg.length / 5 / tot;
+  });
+  return sum / notes.length;
+}
+
+/** Bật/tắt nhiều lần trong một phiên: Stretch được dùng lại, số instance không tăng theo số lần đổi. */
+async function testInstanceReuse() {
+  const ctx = new OfflineAudioContext(2, SR, SR);
+  const engine = await createEngine(ctx, new GainNode(ctx), ctx.destination, { semitones: 3, options: SEP() });
+  const wait = () => new Promise((r) => setTimeout(r, 700)); // > LINGER_S: cleanup đã trả node về pool
+  const counts = [];
+  for (let i = 0; i < 4; i++) {
+    await engine.setOptions({ quality: 'cheaper', formant: true });
+    await engine.startRecording();
+    await engine.stopRecording();
+    await engine.setOptions({ quality: 'default', formant: false, separate: false });
+    await engine.setOptions({ separate: true });
+    await wait();
+    counts.push(engine.debug().stretchInstances);
+  }
+  engine.dispose();
+  record('instanceReuse', {
+    test: 'số Stretch đã tạo sau mỗi vòng (đổi chất lượng/formant, ghi từng lớp, tắt/bật tách lớp)', value: counts.join(' / '),
+    pass: counts.every((c) => c === counts[0]) && counts[0] <= 8,
+  });
+}
+
+async function testStemProfiles() {
+  const p = (patch, stem) => stretchProfile(mergeOptions(undefined, patch), stem);
+  const key = (x) => JSON.stringify(x);
+  record('stemProfiles', {
+    test: 'profile: bass khối dài (default) / dùng chung (cheaper, lowLatency); formant chỉ cho giọng khi tách lớp',
+    pass: p({}, 'bass').config.blockMs > 120 && key(p({ quality: 'cheaper' }, 'bass')) === key(p({ quality: 'cheaper' }, 'other'))
+      && key(p({ quality: 'lowLatency' }, 'bass')) === key(p({ quality: 'lowLatency' }, 'other'))
+      && p({ formant: true }, 'vocals').formant && !p({ formant: true }, 'other').formant && !p({ formant: true }, 'bass').formant
+      && p({ formant: true }, null).formant && !p({}, 'vocals').formant,
+  });
+
+  // Bass: khối 180 ms tách các bồi âm của nốt thấp sạch hơn khối 120 ms.
+  const notes = [41.2, 55, 49, 61.7, 41.2, 55, 49, 61.7];
+  const x = bassline(notes);
+  const k = 2 ** (5 / 12);
+  const mixed = await renderEngine(x, { semitones: 5 });
+  const sep = await renderEngine(x, { semitones: 5, options: SEP() });
+  const pm = harmonicPurity(mixed.y, notes, k, mixed.latency), ps = harmonicPurity(sep.y, notes, k, sep.latency);
+  record('stemProfiles', {
+    test: 'bassline E1–B1 +5: độ sạch bồi âm (không tách → tách lớp, bass khối dài)',
+    value: `${pm.toFixed(3)} → ${ps.toFixed(3)}`, pass: ps > pm + 0.05,
+  });
+
+  // Formant chỉ áp cho lớp giọng: nguồn có formant ~1 kHz; đổi tông +7.
+  const len = SR * 3;
+  const voiced = (() => { const h = harmonics(len, 150, 40, 0.5); const y = bandpass(h, 1000, 1.5); const pk = y.reduce((m, v) => Math.max(m, Math.abs(v)), 0); return y.map((v) => (v / pk) * 0.4); })();
+  const zero = new Float32Array(len);
+  const at = [SR * 1.2, SR * 1.5, SR * 1.8, SR * 2.1];
+  const ratio = (y, lat) => at.reduce((s, a) => s + centroid(y, a + lat, 200, 6000), 0) / at.reduce((s, a) => s + centroid(voiced, a, 200, 6000), 0);
+  const rows = {};
+  for (const [label, signal] of [['giữa → Giọng hát', voiced], ['trái → Nhạc cụ khác', stereo(voiced, zero)]]) {
+    const off = await renderEngine(signal, { semitones: 7, options: SEP() });
+    const on = await renderEngine(signal, { semitones: 7, options: SEP({ formant: true }) });
+    rows[label] = { off: ratio(off.y, off.latency), on: ratio(on.y, on.latency) };
+  }
+  const v = rows['giữa → Giọng hát'], o = rows['trái → Nhạc cụ khác'];
+  record('stemProfiles', {
+    test: 'formant +7: trọng tâm phổ / gốc — giọng (tắt → bật formant)', value: `${v.off.toFixed(2)} → ${v.on.toFixed(2)}`,
+    pass: v.off > 1.25 && v.on < 1.12,
+  });
+  record('stemProfiles', {
+    test: 'formant +7: trọng tâm phổ / gốc — nhạc cụ khác không đổi khi bật formant', value: `${o.off.toFixed(2)} → ${o.on.toFixed(2)}`,
+    pass: o.off > 1.25 && Math.abs(o.on - o.off) < 0.03,
+  });
+}
+
 function parseWav(buf) {
   const v = new DataView(buf);
   const str = (o, n) => String.fromCharCode(...new Uint8Array(buf, o, n));
@@ -471,10 +633,18 @@ async function benchmark() {
   }
 }
 
+const TESTS = [testSeparatorCore, testStemRouting, testAlignment, testBypassAndSharing, testPitch, testTempo, testDrumsKeepPitch, testStemControls, testSwitching, testInstanceReuse, testStemProfiles, testRecording, benchmark];
+
+// ?list: chỉ trả danh sách test. ?only=a,b: chỉ chạy các test đó (tests/run.mjs chạy mỗi test trong một tab riêng:
+// OfflineAudioContext không đóng được nên bộ nhớ WASM của worklet chỉ được trả khi tiến trình trang kết thúc, mà
+// mỗi tiến trình chứa được ~125 WASM memory).
 async function main() {
-  for (const t of [testSeparatorCore, testStemRouting, testAlignment, testBypassAndSharing, testPitch, testTempo, testDrumsKeepPitch, testStemControls, testRecording, benchmark]) {
+  const query = new URLSearchParams(location.search);
+  if (query.has('list')) return { tests: TESTS.map((t) => t.name), sections: {}, ok: true };
+  const only = query.get('only')?.split(',');
+  for (const t of TESTS.filter((t) => !only || only.includes(t.name))) {
     try {
-      await t();
+          await t();
     } catch (e) {
       record(t.name, { error: String(e?.stack || e), pass: false });
     }

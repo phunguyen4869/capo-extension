@@ -1,5 +1,5 @@
 // Chạy tests/pitch-test.html trong Chrome headless qua DevTools Protocol.
-// Dùng: node tests/run.mjs   (biến CHROME để đổi đường dẫn trình duyệt)
+// Dùng: node tests/run.mjs   (biến CHROME để đổi đường dẫn trình duyệt; ONLY=testA,testB để chạy vài test)
 
 import { createServer } from 'node:http';
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
@@ -48,24 +48,17 @@ async function cleanup(code) {
   process.exit(code);
 }
 
-try {
-  let page;
-  let lastErr;
-  for (let i = 0; i < 150 && !page; i++) {
-    try {
-      const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
-      page = targets.find((t) => t.type === 'page');
-    } catch (e) {
-      lastErr = e;
-    }
-    if (!page) await new Promise((r) => setTimeout(r, 200));
-  }
-  if (!page) {
-    throw new Error(`Không kết nối được Chrome DevTools: ${lastErr?.cause?.message || lastErr}\n${chromeLog}`);
-  }
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
+const devtools = `http://127.0.0.1:${debugPort}`;
 
+/**
+ * Mở tab mới (tiến trình renderer riêng), chạy tests/pitch-test.html?`query`, trả window.__result.
+ * Mỗi test chạy trong tab riêng: OfflineAudioContext không đóng được, bộ nhớ WASM của worklet chỉ được trả khi
+ * tiến trình kết thúc, mà một tiến trình chỉ chứa được ~125 WASM memory.
+ */
+async function runPage(query) {
+  const target = await (await fetch(`${devtools}/json/new?about:blank`, { method: 'PUT' })).json();
+  const ws = new WebSocket(target.webSocketDebuggerUrl);
+  await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
   let id = 0;
   const pending = new Map();
   ws.onmessage = (ev) => {
@@ -87,29 +80,52 @@ try {
       pending.set(i, r);
       ws.send(JSON.stringify({ id: i, method, params }));
     });
-
-  await send('Runtime.enable');
-  await send('Log.enable');
-  await send('Page.navigate', { url: `http://127.0.0.1:${port}/tests/pitch-test.html` });
-
-  let result = null;
-  for (let i = 0; i < 240 && !result; i++) {
-    await new Promise((r) => setTimeout(r, 500));
-    const r = await send('Runtime.evaluate', { expression: 'JSON.stringify(window.__result ?? null)', returnByValue: true });
-    result = JSON.parse(r.result?.result?.value ?? 'null');
+  try {
+    await send('Runtime.enable');
+    await send('Log.enable');
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/tests/pitch-test.html?${query}` });
+    for (let i = 0; i < 240; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      const r = await send('Runtime.evaluate', { expression: 'JSON.stringify(window.__result ?? null)', returnByValue: true });
+      const result = JSON.parse(r.result?.result?.value ?? 'null');
+      if (result) return result;
+    }
+    return { ok: false, error: `Hết thời gian chờ kết quả test (${query})`, sections: {} };
+  } finally {
+    ws.close();
+    await fetch(`${devtools}/json/close/${target.id}`).catch(() => {});
   }
-  if (!result) throw new Error('Hết thời gian chờ kết quả test');
+}
 
-  if (result.error) {
-    console.log('ERROR:', result.error);
-  } else {
-    for (const [name, rows] of Object.entries(result.sections)) {
-      console.log(`\n== ${name} ==`);
+try {
+  let lastErr;
+  let ready = false;
+  for (let i = 0; i < 150 && !ready; i++) {
+    try {
+      ready = (await fetch(`${devtools}/json/version`)).ok;
+    } catch (e) {
+      lastErr = e;
+    }
+    if (!ready) await new Promise((r) => setTimeout(r, 200));
+  }
+  if (!ready) {
+    throw new Error(`Không kết nối được Chrome DevTools: ${lastErr?.cause?.message || lastErr}\n${chromeLog}`);
+  }
+
+  const { tests: all } = await runPage('list');
+  const tests = process.env.ONLY ? all.filter((t) => process.env.ONLY.split(',').includes(t)) : all;
+  let ok = true;
+  for (const name of tests) {
+    const result = await runPage(`only=${name}`);
+    if (result.error) console.log(`ERROR (${name}):`, result.error);
+    for (const [section, rows] of Object.entries(result.sections)) {
+      console.log(`\n== ${section} ==`);
       console.table(rows);
     }
+    ok &&= result.ok;
   }
-  console.log(result.ok ? 'PASS' : 'FAIL');
-  await cleanup(result.ok ? 0 : 1);
+  console.log(ok ? 'PASS' : 'FAIL');
+  await cleanup(ok ? 0 : 1);
 } catch (err) {
   console.error(err);
   await cleanup(2);

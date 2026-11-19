@@ -56,17 +56,19 @@ After editing code, click ↻ **Reload** on the CAPO card in `chrome://extension
 | **♯** | Whether this stem follows the transpose slider. |
 | **Record stems** | Records the mix (+ each stem when separation is on). **Stop & save** downloads the WAV files. If the tab is closed while recording, what was recorded is still saved. |
 | **✦ AI separation…** | Opens the CAPO AI page. |
-| **Options** | Language, processing mode, formant preservation, vocal focus. |
+| **Options** | Language, processing mode, formant preservation (applied to the vocal stem only while separating), vocal focus. |
 
 **Processing modes**
 
 | Mode | Transpose latency | With stem separation |
 |---|---|---|
-| High quality (default) | ~120 ms | ~205 ms |
+| High quality (default) | ~120 ms | ~265 ms |
 | Low latency (for video) | ~60 ms | ~113 ms |
 | Save CPU (pitch shift only) | ~140 ms | ~225 ms |
 
 Add your audio device's own latency. The video is not delayed, so the sound lags the picture by that amount.
+
+In *High quality* the bass stem is transposed with a longer 180 ms block (finer bins, so low notes keep cleaner harmonics); every stem is delayed to match it, hence the extra 60 ms with separation.
 
 *High quality* and *Low latency* run the stem separator with a longer FFT and 75 % overlap (finer frequency resolution at the same latency); *Save CPU* keeps the lighter 50 %-overlap separator.
 
@@ -100,15 +102,18 @@ popup / shortcuts ──msg──▶ background.js (service worker) ── chrom
                                         ▼
 offscreen.js → audio/engine.js (one AudioContext per tab):
 
-  no separation:     tab ─▶ [Stretch | Delay] ─▶ speakers
-  separation:        tab ─▶ Separator ─▶ stem ─▶ volume ─┬─▶ shared Stretch ─▶ speakers   (transposed stems)
-                                                        └─▶ shared Delay   ─▶ speakers   (original-key stems)
-  recording stems:   tab ─▶ Separator ─▶ stem ─▶ [Stretch | Delay] ─▶ tap ─▶ volume ─▶ speakers (+ "mix" tap)
+  no separation:     tab ─▷ [Stretch | Delay] ─▶ speakers
+  separation:        tab ─▶ Separator ─▶ stem ─▶ volume ─┬─▷ Stretch per profile ─▶ speakers   (transposed stems)
+                                                        └─▷ shared Delay        ─▶ speakers   (original-key stems)
+  recording stems:   tab ─▶ Separator ─▶ stem ─▷ [Stretch | Delay] ─▶ tap ─▶ volume ─▶ speakers (+ "mix" tap)
+
+  ─▷ = through a gate (GainNode) used for crossfades
 ```
 
-- **One shared Stretch.** All transposed stems use the same key, so they share one pitch shifter. Per-stem shifters exist only while recording (each stem file must be post-transpose) and are dropped afterwards.
+- **Stretch profiles.** All transposed stems use the same key, so stems with the same settings share one pitch shifter. With separation, bass gets a longer block (*High quality* only) and formant preservation is applied to vocals only (on instruments it colours the timbre), so there are up to 3 shared Stretches. Per-stem shifters exist only while recording (each stem file must be post-transpose). Stretch nodes are recycled through an idle pool: a worklet's WASM memory is only released when the AudioContext closes, and a renderer process holds about 125 of them.
 - **Bypass at 0 semitones.** A Delay with exactly the Stretch latency replaces it: output equals input, and the idle Stretch costs nothing (a small patch to Signalsmith, marked `CAPO patch`).
-- **Sample-accurate alignment.** Stretch and Delay paths have identical latency, so stems stay aligned and switching paths never shifts the beat. Routing is declarative (`route()` → `Wiring` applies only the diff); retired nodes keep playing their tail for 0.5 s; reused Delays are recreated and Stretches reset so stale audio is never replayed.
+- **Sample-accurate alignment.** Every path (Stretch + compensating Delay, or Delay) has the latency of the slowest profile in the current mode, so stems stay aligned and switching paths never shifts the beat. Routing is declarative (`route()` → `Wiring` applies only the diff; calls are serialised).
+- **Click-free switching.** Changing path (0 ↔ ≠0 semitones, per-stem ♯, formant, quality, start/stop stem recording) is a 30 ms equal-power crossfade at the gates *in front of* the paths; the old path stays connected for 0.5 s to play its tail. A Stretch's input is never disconnected while it is still audible: with no input the worklet switches to buffer playback and drops its tail (this, plus a Signalsmith bug that applied future-scheduled segments immediately, used to cause a ~120 ms dropout when returning to 0 semitones). A closed gate feeds zeros, so a Stretch that is switched back on needs no reset. Changing quality also changes the latency (120 → 140 ms), so that one crossfade cannot line up perfectly.
 
 ### Stem separator (Rust/WASM, `dsp/`)
 
@@ -147,7 +152,7 @@ Measured with `OfflineAudioContext` (20 s of audio):
 |---|---|
 | Transpose, no separation | 65× real time |
 | No separation, 0 semitones (bypass) | 735× |
-| Stem separation, 3 transposed stems | 23× (≈4 % of one CPU core) |
+| Stem separation, 3 transposed stems | 16× (≈6 % of one CPU core; 2 Stretches: bass + the rest) |
 | Stem separator alone | 38× |
 | AI separation, CPU, single thread | ≈0.35× real time (a 4-minute song takes ≈11 minutes; WebGPU is much faster) |
 
@@ -219,7 +224,10 @@ node tests/capture-e2e.mjs  # end-to-end: real tab capture → separation → +2
 | `separator` | 4 stems sum to the delayed input; latency exact to the sample |
 | `stemRouting` | centered tone → vocals, left-panned tone → other, low tone → bass, clicks → drums |
 | `alignment` | measured latency equals reported latency (Delay and Stretch paths, with and without separation) |
-| `bypassAndSharing` | 0 semitones ⇒ output equals delayed input; number of running Stretches per mode (0 / 1 / 3 while recording) |
+| `bypassAndSharing` | 0 semitones ⇒ output equals delayed input; number of running Stretches per mode (0 / 1 / 2 with separation / 3 with formant / 3 while recording) |
+| `switching` | changing key, per-stem ♯, formant, quality or starting stem recording mid-playback: no click (high-frequency energy < +6 dB) and no dropout (envelope > −4 dB) |
+| `instanceReuse` | repeated option changes and recordings in one session keep the number of Stretch instances constant |
+| `stemProfiles` | bass line E1–B1: harmonic purity 0.75 → 0.86 with the bass profile; formant preservation moves the vocal's spectral centroid back (×1.44 → ×0.88) and leaves the "other" stem untouched |
 | `pitch` | 440 Hz sine through −12…+12 semitones in every mode, error < 0.5 % |
 | `tempo` | a 0.5 s beat is still 0.5 s after transposing |
 | `drumsKeepPitch` | snare spectral centroid ×1.38 when transposed, ×1.02 when drums keep their key |
@@ -252,7 +260,7 @@ No host permissions. No analytics. Audio never leaves your computer.
 
 | Component | License |
 |---|---|
-| [Signalsmith Stretch](https://signalsmith-audio.co.uk/code/stretch/) 1.3.2 — `lib/SignalsmithStretch.mjs` | MIT © Geraint Luff (with one small patch, see `lib/SignalsmithStretch.SOURCE.txt`) |
+| [Signalsmith Stretch](https://signalsmith-audio.co.uk/code/stretch/) 1.3.2 — `lib/SignalsmithStretch.mjs` | MIT © Geraint Luff (with two small patches, see `lib/SignalsmithStretch.SOURCE.txt`) |
 | [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) 1.31.1 — `lib/onnxruntime-web/` | MIT © Microsoft |
 | [demucs-web](https://github.com/timcsy/demucs-web) 1.0.2 — `lib/demucs-web/` | MIT |
 | [realfft](https://crates.io/crates/realfft) 3.5 (compiled into `wasm/capo_dsp.wasm`) | MIT |

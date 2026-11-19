@@ -7,6 +7,24 @@ export const QUALITY_PRESETS = {
   lowLatency: { blockMs: 60, intervalMs: 10 }, // trễ thấp hơn, hợp xem video (interval 10 ms: sai số cao độ < 0.5%)
 };
 
+// Stretch riêng cho lớp bass khi tách lớp: khối 180 ms ⇒ bin hẹp hơn (≈ 5,6 Hz) nên bồi âm của nốt thấp (E1 41 Hz)
+// tách nhau sạch hơn (độ sạch bồi âm ≈ 0,75 → 0,87 so với khối 120 ms); bass ít transient nên nhòe thời gian không
+// đáng kể. Cả engine được bù trễ theo nhánh chậm nhất ⇒ tách lớp trễ thêm 60 ms. `cheaper`/`lowLatency` không có
+// mục riêng: bass dùng chung Stretch với các lớp khác (giữ CPU / độ trễ thấp).
+export const BASS_STRETCH_PRESETS = {
+  default: { blockMs: 180, intervalMs: 45 },
+};
+
+/**
+ * Cấu hình Stretch cho một lớp (`stem` = null: không tách lớp, xử lý cả bản mix). Các lớp cùng profile dùng chung
+ * một Stretch. Bù formant chỉ áp cho lớp giọng khi tách lớp (trên nhạc cụ nó làm âm sắc kém tự nhiên).
+ */
+export function stretchProfile(options, stem = null) {
+  const quality = QUALITY_PRESETS[options.quality] ? options.quality : 'default';
+  const config = (stem === 'bass' && BASS_STRETCH_PRESETS[quality]) || QUALITY_PRESETS[quality];
+  return { config, formant: !!options.formant && (stem === null || stem === 'vocals') };
+}
+
 // Bộ tách lớp (Rust/WASM) — giá trị cho 44.1/48 kHz. Latency = fftSize + timeHalf·hop mẫu.
 // Chọn bằng `dsp/build.sh tune` (dsp/examples/tune.rs).
 // default/lowLatency dùng FFT dài, chồng lấp 75 %: bin hẹp gấp đôi (23/47 Hz) nên nốt bass, kick và bồi âm tách
